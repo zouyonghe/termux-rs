@@ -10,3 +10,4 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
 termux-core = { path = "../termux-core" }
+termux-runtime = { path = "../termux-runtime" }
