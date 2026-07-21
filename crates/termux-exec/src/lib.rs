@@ -78,7 +78,7 @@ mod tests {
     use std::io::Read;
     use std::path::PathBuf;
 
-    use termux_pty::PtySize;
+    use termux_pty::{PtySession, PtySize};
     use termux_runtime::{DEFAULT_PACKAGE_NAME, ExecutionRequest, RunnerKind, TermuxPaths};
 
     use super::{UnixExecutionError, spawn_unix_pty};
@@ -137,7 +137,7 @@ mod tests {
             executable: PathBuf::from("/bin/sh"),
             args: Vec::new(),
             stdin: None,
-            working_directory: None,
+            working_directory: Some(PathBuf::from("/tmp")),
             runner: RunnerKind::AppShell,
             label: None,
             environment: BTreeMap::new(),
@@ -147,5 +147,46 @@ mod tests {
             spawn_unix_pty(&paths, &request, PtySize::new(80, 24)),
             Err(UnixExecutionError::UnsupportedRunner(RunnerKind::AppShell))
         ));
+    }
+
+    #[test]
+    fn observes_normal_request_exit_through_adapter_session() {
+        let paths = TermuxPaths::new(DEFAULT_PACKAGE_NAME).unwrap();
+        let request = ExecutionRequest {
+            executable: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "exit 12".to_string()],
+            stdin: None,
+            working_directory: Some(PathBuf::from("/tmp")),
+            runner: RunnerKind::TerminalSession,
+            label: None,
+            environment: BTreeMap::new(),
+        };
+        let mut session = spawn_unix_pty(&paths, &request, PtySize::new(80, 24)).unwrap();
+
+        let status = session.wait().unwrap();
+
+        assert_eq!(12, status.code);
+        assert!(!status.success());
+        assert_eq!(Some(status), session.try_wait().unwrap());
+    }
+
+    #[test]
+    fn terminates_running_request_through_adapter_session() {
+        let paths = TermuxPaths::new(DEFAULT_PACKAGE_NAME).unwrap();
+        let request = ExecutionRequest {
+            executable: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "sleep 10".to_string()],
+            stdin: None,
+            working_directory: Some(PathBuf::from("/tmp")),
+            runner: RunnerKind::TerminalSession,
+            label: None,
+            environment: BTreeMap::new(),
+        };
+        let mut session = spawn_unix_pty(&paths, &request, PtySize::new(80, 24)).unwrap();
+
+        let status = session.terminate().unwrap();
+
+        assert!(!status.success());
+        assert_eq!(status, session.terminate().unwrap());
     }
 }
