@@ -87,7 +87,7 @@ pub trait PtySession: Read + Write {
 
 pub struct UnixPtySession {
     master: Box<dyn MasterPty + Send>,
-    reader: Box<dyn Read + Send>,
+    reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     exit_status: Option<PtyExitStatus>,
@@ -122,7 +122,7 @@ impl UnixPtySession {
 
         Ok(Self {
             master: pair.master,
-            reader,
+            reader: Some(reader),
             writer,
             child,
             exit_status: None,
@@ -133,6 +133,15 @@ impl UnixPtySession {
         let status = PtyExitStatus::from(status);
         self.exit_status = Some(status.clone());
         status
+    }
+
+    pub fn take_reader(&mut self) -> std::io::Result<Box<dyn Read + Send>> {
+        self.reader.take().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "PTY reader is already owned",
+            )
+        })
     }
 }
 
@@ -171,7 +180,12 @@ impl PtySession for UnixPtySession {
 
 impl Read for UnixPtySession {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.reader.read(buffer)
+        self.reader
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PTY reader is unavailable")
+            })?
+            .read(buffer)
     }
 }
 

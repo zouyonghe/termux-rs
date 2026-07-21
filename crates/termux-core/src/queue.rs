@@ -45,8 +45,8 @@ impl ByteQueue {
         }
     }
 
-    /// Closes the queue and wakes blocked readers and writers. Reads after
-    /// close return `QueueRead::Closed`, including when bytes remain buffered.
+    /// Closes the queue and wakes blocked readers and writers. Buffered bytes
+    /// remain readable before subsequent reads return `QueueRead::Closed`.
     pub fn close(&self) {
         let mut state = self.state.lock().expect("queue mutex poisoned");
         state.open = false;
@@ -81,7 +81,7 @@ impl ByteQueue {
             }
             state = self.readable.wait(state).expect("queue mutex poisoned");
         }
-        if !state.open {
+        if state.bytes.is_empty() && !state.open {
             return QueueRead::Closed;
         }
 

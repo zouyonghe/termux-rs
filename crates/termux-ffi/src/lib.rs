@@ -1,7 +1,10 @@
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::thread;
 
 use termux_core::emulator::Terminal;
+use termux_core::queue::{ByteQueue, QueueRead};
 use termux_core::session::TerminalSessionClient;
 use termux_core::terminal::Size;
 use termux_pty::{PtySession, PtySize, UnixPtySession};
@@ -12,6 +15,7 @@ pub const TERMUX_INVALID_ARGUMENT: i32 = -1;
 pub const TERMUX_PANIC: i32 = -2;
 pub const TERMUX_IO_ERROR: i32 = -3;
 pub const TERMUX_SESSION_RUNNING: i32 = 1;
+pub const TERMUX_SESSION_OUTPUT_CLOSED: i32 = 2;
 pub const TERMUX_BOOTSTRAP_NOT_INSTALLED: i32 = 0;
 pub const TERMUX_BOOTSTRAP_INSTALLING: i32 = 1;
 pub const TERMUX_BOOTSTRAP_INSTALLED: i32 = 2;
@@ -26,6 +30,7 @@ pub struct TermuxTerminal {
 pub struct TermuxTerminalSession {
     terminal: Terminal,
     pty: UnixPtySession,
+    output: Arc<ByteQueue>,
 }
 
 struct NoopSessionClient;
@@ -76,14 +81,29 @@ pub unsafe extern "C" fn termux_terminal_session_create(
             })
             .collect::<Option<Vec<_>>>()?;
         let size = Size::new(columns, rows);
+        let mut pty = UnixPtySession::spawn(
+            command,
+            &arguments,
+            PtySize::new(columns as u16, rows as u16),
+        )
+        .ok()?;
+        let reader = pty.take_reader().ok()?;
+        let output = Arc::new(ByteQueue::new(64 * 1024));
+        let queue = Arc::clone(&output);
+        thread::spawn(move || {
+            let mut reader = reader;
+            let mut buffer = [0; 4096];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 || queue.write(&buffer[..count]).is_err() {
+                    break;
+                }
+            }
+            queue.close();
+        });
         Some(Box::into_raw(Box::new(TermuxTerminalSession {
             terminal: Terminal::new(size),
-            pty: UnixPtySession::spawn(
-                command,
-                &arguments,
-                PtySize::new(columns as u16, rows as u16),
-            )
-            .ok()?,
+            pty,
+            output,
         })))
     }))
     .ok()
@@ -111,6 +131,34 @@ pub unsafe extern "C" fn termux_terminal_session_feed_output(
         };
         unsafe { &mut *handle }.terminal.feed_bytes(data);
         TERMUX_OK
+    }))
+    .unwrap_or(TERMUX_PANIC)
+}
+
+/// Drains available PTY output into the emulator without blocking.
+///
+/// # Safety
+/// `handle` must be a live session with exclusive access.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_pump_output(
+    handle: *mut TermuxTerminalSession,
+) -> i32 {
+    if handle.is_null() {
+        return TERMUX_INVALID_ARGUMENT;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let session = unsafe { &mut *handle };
+        let mut buffer = [0; 4096];
+        match session.output.read(&mut buffer, false) {
+            QueueRead::Data(count) => {
+                if count > 0 {
+                    session.terminal.feed_bytes(&buffer[..count]);
+                }
+                TERMUX_OK
+            }
+            QueueRead::Empty => TERMUX_SESSION_RUNNING,
+            QueueRead::Closed => TERMUX_SESSION_OUTPUT_CLOSED,
+        }
     }))
     .unwrap_or(TERMUX_PANIC)
 }
@@ -516,11 +564,14 @@ mod tests {
         termux_bootstrap_create, termux_bootstrap_free, termux_bootstrap_state,
         termux_terminal_create, termux_terminal_feed, termux_terminal_free, termux_terminal_render,
         termux_terminal_session_create, termux_terminal_session_feed_output,
-        termux_terminal_session_free, termux_terminal_session_render,
-        termux_terminal_session_resize, termux_terminal_session_terminate,
-        termux_terminal_session_try_wait, termux_terminal_session_write_input,
+        termux_terminal_session_free, termux_terminal_session_pump_output,
+        termux_terminal_session_render, termux_terminal_session_resize,
+        termux_terminal_session_terminate, termux_terminal_session_try_wait,
+        termux_terminal_session_write_input,
     };
     use std::ffi::CString;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn creates_feeds_renders_and_frees_a_terminal() {
@@ -663,5 +714,36 @@ mod tests {
         assert_eq!(TERMUX_INVALID_ARGUMENT, unsafe {
             termux_terminal_session_try_wait(std::ptr::null_mut(), std::ptr::null_mut())
         });
+    }
+
+    #[test]
+    fn terminal_session_pumps_pty_output_into_emulator() {
+        let command = CString::new("/bin/sh").unwrap();
+        let argument = CString::new("-c").unwrap();
+        let script = CString::new("printf bridged").unwrap();
+        let arguments = [argument.as_ptr(), script.as_ptr()];
+        let handle = unsafe {
+            termux_terminal_session_create(
+                command.as_ptr(),
+                arguments.as_ptr(),
+                arguments.len(),
+                8,
+                1,
+            )
+        };
+
+        for _ in 0..100 {
+            let status = unsafe { termux_terminal_session_pump_output(handle) };
+            if status == TERMUX_OK {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let required = unsafe { termux_terminal_session_render(handle, std::ptr::null_mut(), 0) };
+        let mut rendered = vec![0; required];
+        unsafe { termux_terminal_session_render(handle, rendered.as_mut_ptr(), rendered.len()) };
+
+        assert!(rendered.starts_with(b"bridged"));
+        unsafe { termux_terminal_session_free(handle) };
     }
 }
