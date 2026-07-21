@@ -176,6 +176,7 @@ name = "termux-ffi"
 version = "0.1.0"
 dependencies = [
  "termux-core",
+ "termux-pty",
  "termux-runtime",
 ]
 

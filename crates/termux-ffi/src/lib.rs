@@ -1,12 +1,17 @@
+use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use termux_core::emulator::Terminal;
+use termux_core::session::TerminalSessionClient;
 use termux_core::terminal::Size;
+use termux_pty::{PtySession, PtySize, UnixPtySession};
 use termux_runtime::{BootstrapInstaller, BootstrapState, BootstrapStorage};
 
 pub const TERMUX_OK: i32 = 0;
 pub const TERMUX_INVALID_ARGUMENT: i32 = -1;
 pub const TERMUX_PANIC: i32 = -2;
+pub const TERMUX_IO_ERROR: i32 = -3;
+pub const TERMUX_SESSION_RUNNING: i32 = 1;
 pub const TERMUX_BOOTSTRAP_NOT_INSTALLED: i32 = 0;
 pub const TERMUX_BOOTSTRAP_INSTALLING: i32 = 1;
 pub const TERMUX_BOOTSTRAP_INSTALLED: i32 = 2;
@@ -16,6 +21,234 @@ pub const TERMUX_BOOTSTRAP_FAILED: i32 = 3;
 /// exactly once with `termux_terminal_free`.
 pub struct TermuxTerminal {
     terminal: Terminal,
+}
+
+pub struct TermuxTerminalSession {
+    terminal: Terminal,
+    pty: UnixPtySession,
+}
+
+struct NoopSessionClient;
+
+impl TerminalSessionClient for NoopSessionClient {
+    fn text_changed(&mut self) {}
+    fn title_changed(&mut self) {}
+    fn session_finished(&mut self) {}
+    fn resized(&mut self, _: Size) {}
+    fn cursor_state_changed(&mut self, _: bool) {}
+}
+
+/// # Safety
+/// `command` and every argument must be valid NUL-terminated UTF-8 C strings.
+/// `arguments` must contain `argument_count` readable pointers when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_create(
+    command: *const std::ffi::c_char,
+    arguments: *const *const std::ffi::c_char,
+    argument_count: usize,
+    columns: usize,
+    rows: usize,
+) -> *mut TermuxTerminalSession {
+    if command.is_null()
+        || columns == 0
+        || rows == 0
+        || columns > u16::MAX as usize
+        || rows > u16::MAX as usize
+        || (arguments.is_null() && argument_count != 0)
+    {
+        return std::ptr::null_mut();
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let command = unsafe { std::ffi::CStr::from_ptr(command) }.to_str().ok()?;
+        let arguments = if argument_count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(arguments, argument_count) }
+        };
+        let arguments = arguments
+            .iter()
+            .map(|argument| {
+                if argument.is_null() {
+                    None
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(*argument) }.to_str().ok()
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let size = Size::new(columns, rows);
+        Some(Box::into_raw(Box::new(TermuxTerminalSession {
+            terminal: Terminal::new(size),
+            pty: UnixPtySession::spawn(
+                command,
+                &arguments,
+                PtySize::new(columns as u16, rows as u16),
+            )
+            .ok()?,
+        })))
+    }))
+    .ok()
+    .flatten()
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// # Safety
+/// `handle` must be a live session with exclusive access. Non-empty `data`
+/// must reference readable memory for `length` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_feed_output(
+    handle: *mut TermuxTerminalSession,
+    data: *const u8,
+    length: usize,
+) -> i32 {
+    if handle.is_null() || (data.is_null() && length != 0) {
+        return TERMUX_INVALID_ARGUMENT;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let data = if length == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, length) }
+        };
+        unsafe { &mut *handle }.terminal.feed_bytes(data);
+        TERMUX_OK
+    }))
+    .unwrap_or(TERMUX_PANIC)
+}
+
+/// # Safety
+/// `handle` must be a live session with exclusive access. Non-empty `data`
+/// must reference readable memory for `length` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_write_input(
+    handle: *mut TermuxTerminalSession,
+    data: *const u8,
+    length: usize,
+) -> i32 {
+    if handle.is_null() || (data.is_null() && length != 0) {
+        return TERMUX_INVALID_ARGUMENT;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let data = if length == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, length) }
+        };
+        let session = unsafe { &mut *handle };
+        session
+            .pty
+            .write_all(data)
+            .and_then(|()| session.pty.flush())
+            .map_or(TERMUX_IO_ERROR, |_| TERMUX_OK)
+    }))
+    .unwrap_or(TERMUX_PANIC)
+}
+
+/// # Safety
+/// `handle` must remain valid. Non-null `buffer` must be writable for
+/// `capacity` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_render(
+    handle: *const TermuxTerminalSession,
+    buffer: *mut u8,
+    capacity: usize,
+) -> usize {
+    if handle.is_null() || (buffer.is_null() && capacity != 0) {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let rendered = render_terminal(&unsafe { &*handle }.terminal);
+        if buffer.is_null() && capacity == 0 {
+            return rendered.len();
+        }
+        if capacity < rendered.len() {
+            return 0;
+        }
+        unsafe { std::ptr::copy_nonoverlapping(rendered.as_ptr(), buffer, rendered.len()) };
+        rendered.len()
+    }))
+    .unwrap_or(0)
+}
+
+/// # Safety
+/// `handle` must be a live session with exclusive access.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_resize(
+    handle: *mut TermuxTerminalSession,
+    columns: usize,
+    rows: usize,
+) -> i32 {
+    if handle.is_null()
+        || columns == 0
+        || rows == 0
+        || columns > u16::MAX as usize
+        || rows > u16::MAX as usize
+    {
+        return TERMUX_INVALID_ARGUMENT;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let session = unsafe { &mut *handle };
+        session
+            .pty
+            .resize(PtySize::new(columns as u16, rows as u16))
+            .map_err(|_| TERMUX_IO_ERROR)?;
+        session
+            .terminal
+            .resize_with_client(Size::new(columns, rows), &mut NoopSessionClient);
+        Ok::<_, i32>(TERMUX_OK)
+    }))
+    .unwrap_or(Err(TERMUX_PANIC))
+    .unwrap_or_else(|status| status)
+}
+
+/// # Safety
+/// `handle` must be a live session with exclusive access and `exit_code` must
+/// point to writable memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_try_wait(
+    handle: *mut TermuxTerminalSession,
+    exit_code: *mut u32,
+) -> i32 {
+    if handle.is_null() || exit_code.is_null() {
+        return TERMUX_INVALID_ARGUMENT;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        match unsafe { &mut *handle }.pty.try_wait() {
+            Ok(Some(status)) => {
+                unsafe { *exit_code = status.code };
+                TERMUX_OK
+            }
+            Ok(None) => TERMUX_SESSION_RUNNING,
+            Err(_) => TERMUX_IO_ERROR,
+        }
+    }))
+    .unwrap_or(TERMUX_PANIC)
+}
+
+/// # Safety
+/// `handle` must be a live session with exclusive access.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_terminate(
+    handle: *mut TermuxTerminalSession,
+) -> i32 {
+    if handle.is_null() {
+        return TERMUX_INVALID_ARGUMENT;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        unsafe { &mut *handle }
+            .pty
+            .terminate()
+            .map_or(TERMUX_IO_ERROR, |_| TERMUX_OK)
+    }))
+    .unwrap_or(TERMUX_PANIC)
+}
+
+/// # Safety
+/// `handle` must be null or an owned session handle not previously freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_free(handle: *mut TermuxTerminalSession) {
+    if !handle.is_null() {
+        let _ = catch_unwind(AssertUnwindSafe(|| unsafe { drop(Box::from_raw(handle)) }));
+    }
 }
 
 /// Opaque bootstrap state handle. Create with `termux_bootstrap_create` and
@@ -282,7 +515,12 @@ mod tests {
         TERMUX_INVALID_ARGUMENT, TERMUX_OK, termux_bootstrap_begin, termux_bootstrap_complete,
         termux_bootstrap_create, termux_bootstrap_free, termux_bootstrap_state,
         termux_terminal_create, termux_terminal_feed, termux_terminal_free, termux_terminal_render,
+        termux_terminal_session_create, termux_terminal_session_feed_output,
+        termux_terminal_session_free, termux_terminal_session_render,
+        termux_terminal_session_resize, termux_terminal_session_terminate,
+        termux_terminal_session_try_wait, termux_terminal_session_write_input,
     };
+    use std::ffi::CString;
 
     #[test]
     fn creates_feeds_renders_and_frees_a_terminal() {
@@ -365,5 +603,65 @@ mod tests {
             termux_bootstrap_state(handle)
         });
         unsafe { termux_bootstrap_free(handle) };
+    }
+
+    #[test]
+    fn terminal_session_ffi_feeds_renders_resizes_and_terminates() {
+        let command = CString::new("/bin/sh").unwrap();
+        let argument = CString::new("-c").unwrap();
+        let script = CString::new("read line; sleep 10").unwrap();
+        let arguments = [argument.as_ptr(), script.as_ptr()];
+        let handle = unsafe {
+            termux_terminal_session_create(
+                command.as_ptr(),
+                arguments.as_ptr(),
+                arguments.len(),
+                4,
+                2,
+            )
+        };
+        assert!(!handle.is_null());
+
+        assert_eq!(TERMUX_OK, unsafe {
+            termux_terminal_session_feed_output(handle, b"hi".as_ptr(), 2)
+        });
+        let required = unsafe { termux_terminal_session_render(handle, std::ptr::null_mut(), 0) };
+        let mut rendered = vec![0; required];
+        assert_eq!(required, unsafe {
+            termux_terminal_session_render(handle, rendered.as_mut_ptr(), rendered.len())
+        });
+        assert_eq!(b"hi  \n    ", rendered.as_slice());
+        assert_eq!(TERMUX_OK, unsafe {
+            termux_terminal_session_resize(handle, 6, 3)
+        });
+        assert_eq!(TERMUX_OK, unsafe {
+            termux_terminal_session_write_input(handle, b"input\n".as_ptr(), 6)
+        });
+        assert_eq!(TERMUX_OK, unsafe {
+            termux_terminal_session_terminate(handle)
+        });
+        let mut code = 0;
+        assert_eq!(TERMUX_OK, unsafe {
+            termux_terminal_session_try_wait(handle, &mut code)
+        });
+
+        unsafe { termux_terminal_session_free(handle) };
+    }
+
+    #[test]
+    fn terminal_session_ffi_rejects_invalid_arguments() {
+        assert!(
+            unsafe { termux_terminal_session_create(std::ptr::null(), std::ptr::null(), 0, 4, 2) }
+                .is_null()
+        );
+        assert_eq!(TERMUX_INVALID_ARGUMENT, unsafe {
+            termux_terminal_session_feed_output(std::ptr::null_mut(), std::ptr::null(), 1)
+        });
+        assert_eq!(TERMUX_INVALID_ARGUMENT, unsafe {
+            termux_terminal_session_resize(std::ptr::null_mut(), 4, 2)
+        });
+        assert_eq!(TERMUX_INVALID_ARGUMENT, unsafe {
+            termux_terminal_session_try_wait(std::ptr::null_mut(), std::ptr::null_mut())
+        });
     }
 }
