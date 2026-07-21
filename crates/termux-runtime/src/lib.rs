@@ -3,6 +3,69 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PACKAGE_NAME: &str = "com.termux";
+const PROTECTED_ENVIRONMENT_VARIABLES: [&str; 5] =
+    ["HOME", "PATH", "PREFIX", "TERMUX_APP_PACKAGE", "TMPDIR"];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerKind {
+    TerminalSession,
+    AppShell,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionRequest {
+    pub executable: PathBuf,
+    pub args: Vec<String>,
+    pub stdin: Option<Vec<u8>>,
+    pub working_directory: Option<PathBuf>,
+    pub runner: RunnerKind,
+    pub label: Option<String>,
+    pub environment: BTreeMap<String, String>,
+}
+
+impl ExecutionRequest {
+    pub fn validate(&self) -> Result<(), ExecutionRequestError> {
+        if self.executable.as_os_str().is_empty() {
+            return Err(ExecutionRequestError::EmptyExecutable);
+        }
+        if self.executable.as_os_str().as_encoded_bytes().contains(&0) {
+            return Err(ExecutionRequestError::NulInExecutable);
+        }
+        for (index, argument) in self.args.iter().enumerate() {
+            if argument.contains('\0') {
+                return Err(ExecutionRequestError::NulInArgument(index));
+            }
+        }
+        if self
+            .working_directory
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().as_encoded_bytes().contains(&0))
+        {
+            return Err(ExecutionRequestError::NulInWorkingDirectory);
+        }
+        validate_environment_overrides(&self.environment)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionRequestError {
+    EmptyExecutable,
+    NulInExecutable,
+    NulInArgument(usize),
+    NulInWorkingDirectory,
+    InvalidEnvironmentName(String),
+    NulInEnvironmentName(String),
+    NulInEnvironmentValue(String),
+    ProtectedEnvironmentVariable(String),
+}
+
+impl fmt::Display for ExecutionRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid execution request: {self:?}")
+    }
+}
+
+impl std::error::Error for ExecutionRequestError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapPackageManager {
@@ -213,6 +276,48 @@ impl TermuxPaths {
             ("TMPDIR", self.tmp_dir().display().to_string()),
         ])
     }
+
+    pub fn environment_with_overrides(
+        &self,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, String>, ExecutionRequestError> {
+        validate_environment_overrides(overrides)?;
+        let mut environment = self
+            .environment()
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect::<BTreeMap<_, _>>();
+        environment.extend(overrides.clone());
+        Ok(environment)
+    }
+}
+
+fn validate_environment_overrides(
+    overrides: &BTreeMap<String, String>,
+) -> Result<(), ExecutionRequestError> {
+    for (name, value) in overrides {
+        if name.contains('\0') {
+            return Err(ExecutionRequestError::NulInEnvironmentName(name.clone()));
+        }
+        if !valid_environment_name(name) {
+            return Err(ExecutionRequestError::InvalidEnvironmentName(name.clone()));
+        }
+        if value.contains('\0') {
+            return Err(ExecutionRequestError::NulInEnvironmentValue(name.clone()));
+        }
+        if PROTECTED_ENVIRONMENT_VARIABLES.contains(&name.as_str()) {
+            return Err(ExecutionRequestError::ProtectedEnvironmentVariable(
+                name.clone(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn valid_package_name(name: &str) -> bool {
@@ -227,9 +332,13 @@ fn valid_package_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
     use super::{
         BootstrapInstaller, BootstrapMetadata, BootstrapPackageManager, BootstrapState,
-        BootstrapStorage, BootstrapVariant, DEFAULT_PACKAGE_NAME, TermuxPaths,
+        BootstrapStorage, BootstrapVariant, DEFAULT_PACKAGE_NAME, ExecutionRequest,
+        ExecutionRequestError, RunnerKind, TermuxPaths,
     };
 
     struct MockStorage {
@@ -322,6 +431,143 @@ mod tests {
         assert_eq!("apt", metadata.package_manager().name());
         assert_eq!("apt-android-7", metadata.variant().name());
         assert!(BootstrapMetadata::from_variant_name("pacman-android-7").is_err());
+    }
+
+    fn execution_request() -> ExecutionRequest {
+        ExecutionRequest {
+            executable: PathBuf::from("/data/data/com.termux/files/usr/bin/sh"),
+            args: vec!["-l".to_string()],
+            stdin: None,
+            working_directory: Some(PathBuf::from("/data/data/com.termux/files/home")),
+            runner: RunnerKind::TerminalSession,
+            label: Some("shell".to_string()),
+            environment: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn execution_request_allows_raw_stdin_and_validates_runner_data() {
+        let mut request = execution_request();
+        request.stdin = Some(vec![b'a', 0, b'b']);
+        request.runner = RunnerKind::AppShell;
+
+        assert_eq!(Ok(()), request.validate());
+    }
+
+    #[test]
+    fn execution_request_rejects_invalid_fields_with_structured_errors() {
+        let mut request = execution_request();
+        request.executable = PathBuf::new();
+        assert_eq!(
+            Err(ExecutionRequestError::EmptyExecutable),
+            request.validate()
+        );
+
+        request.executable = PathBuf::from("shell\0");
+        assert_eq!(
+            Err(ExecutionRequestError::NulInExecutable),
+            request.validate()
+        );
+
+        request.executable = PathBuf::from("shell");
+        request.args = vec!["ok".to_string(), "bad\0".to_string()];
+        assert_eq!(
+            Err(ExecutionRequestError::NulInArgument(1)),
+            request.validate()
+        );
+
+        request.args.clear();
+        request.working_directory = Some(PathBuf::from("home\0"));
+        assert_eq!(
+            Err(ExecutionRequestError::NulInWorkingDirectory),
+            request.validate()
+        );
+    }
+
+    #[test]
+    fn execution_request_rejects_invalid_and_protected_environment_overrides() {
+        let mut request = execution_request();
+        request
+            .environment
+            .insert("1INVALID".to_string(), "x".to_string());
+        assert_eq!(
+            Err(ExecutionRequestError::InvalidEnvironmentName(
+                "1INVALID".to_string()
+            )),
+            request.validate()
+        );
+
+        request.environment.clear();
+        request
+            .environment
+            .insert("A\0".to_string(), "x".to_string());
+        assert_eq!(
+            Err(ExecutionRequestError::NulInEnvironmentName(
+                "A\0".to_string()
+            )),
+            request.validate()
+        );
+
+        request.environment.clear();
+        request
+            .environment
+            .insert("LANG".to_string(), "x\0".to_string());
+        assert_eq!(
+            Err(ExecutionRequestError::NulInEnvironmentValue(
+                "LANG".to_string()
+            )),
+            request.validate()
+        );
+
+        request.environment.clear();
+        request
+            .environment
+            .insert("PATH".to_string(), "other".to_string());
+        assert_eq!(
+            Err(ExecutionRequestError::ProtectedEnvironmentVariable(
+                "PATH".to_string()
+            )),
+            request.validate()
+        );
+    }
+
+    #[test]
+    fn environment_overrides_merge_in_stable_order_without_replacing_termux_values() {
+        let paths = TermuxPaths::new(DEFAULT_PACKAGE_NAME).unwrap();
+        let overrides = BTreeMap::from([
+            ("LANG".to_string(), "C.UTF-8".to_string()),
+            ("TERM".to_string(), "xterm-256color".to_string()),
+        ]);
+
+        let environment = paths.environment_with_overrides(&overrides).unwrap();
+
+        assert_eq!(Some(&"C.UTF-8".to_string()), environment.get("LANG"));
+        assert_eq!(Some(&"xterm-256color".to_string()), environment.get("TERM"));
+        assert_eq!(
+            Some(&"/data/data/com.termux/files/usr/bin".to_string()),
+            environment.get("PATH")
+        );
+        assert_eq!(
+            vec![
+                "HOME",
+                "LANG",
+                "PATH",
+                "PREFIX",
+                "TERM",
+                "TERMUX_APP_PACKAGE",
+                "TMPDIR"
+            ],
+            environment.keys().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            Err(ExecutionRequestError::ProtectedEnvironmentVariable(
+                "HOME".to_string()
+            )),
+            paths.environment_with_overrides(&BTreeMap::from([(
+                "HOME".to_string(),
+                "other".to_string()
+            )]))
+        );
     }
 
     #[test]
