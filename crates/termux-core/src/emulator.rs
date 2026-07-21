@@ -1,3 +1,4 @@
+use crate::session::{TerminalOutput, TerminalSessionClient};
 use crate::terminal::{Position, Screen, Size, Style};
 use crate::utf8::Utf8Decoder;
 
@@ -43,6 +44,23 @@ impl Terminal {
                 self.feed_char(value);
             }
         }
+    }
+
+    pub fn feed_bytes_with_output(&mut self, bytes: &[u8], output: &mut impl TerminalOutput) {
+        for byte in bytes {
+            for value in self.utf8.accept(*byte) {
+                if matches!(self.state, ParserState::Ground) && value == '\u{7}' {
+                    output.bell();
+                } else {
+                    self.feed_char(value);
+                }
+            }
+        }
+    }
+
+    pub fn resize_with_client(&mut self, size: Size, client: &mut impl TerminalSessionClient) {
+        self.screen.resize(size);
+        client.resized(size);
     }
 
     pub fn finish_input(&mut self) {
@@ -236,7 +254,48 @@ fn amount(params: &[usize]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::Terminal;
+    use crate::session::{TerminalOutput, TerminalSessionClient};
     use crate::terminal::{Position, Size, Style};
+
+    #[derive(Default)]
+    struct MockOutput {
+        bells: usize,
+    }
+
+    impl TerminalOutput for MockOutput {
+        fn write_to_process(&mut self, _bytes: &[u8]) {}
+
+        fn title_changed(&mut self, _old_title: Option<&str>, _new_title: &str) {}
+
+        fn copy_to_clipboard(&mut self, _text: &str) {}
+
+        fn paste_from_clipboard(&mut self) {}
+
+        fn bell(&mut self) {
+            self.bells += 1;
+        }
+
+        fn colors_changed(&mut self) {}
+    }
+
+    #[derive(Default)]
+    struct MockSessionClient {
+        resized: Vec<Size>,
+    }
+
+    impl TerminalSessionClient for MockSessionClient {
+        fn text_changed(&mut self) {}
+
+        fn title_changed(&mut self) {}
+
+        fn session_finished(&mut self) {}
+
+        fn resized(&mut self, size: Size) {
+            self.resized.push(size);
+        }
+
+        fn cursor_state_changed(&mut self, _visible: bool) {}
+    }
 
     #[test]
     fn writes_printable_utf8_text() {
@@ -245,6 +304,19 @@ mod tests {
         terminal.feed_bytes("a枝".as_bytes());
 
         assert_eq!(Some("a枝    ".to_string()), terminal.screen().row_text(0));
+    }
+
+    #[test]
+    fn notifies_output_and_session_clients() {
+        let mut terminal = Terminal::new(Size::new(3, 2));
+        let mut output = MockOutput::default();
+        let mut client = MockSessionClient::default();
+
+        terminal.feed_bytes_with_output(b"\x07", &mut output);
+        terminal.resize_with_client(Size::new(4, 3), &mut client);
+
+        assert_eq!(1, output.bells);
+        assert_eq!(vec![Size::new(4, 3)], client.resized);
     }
 
     #[test]
