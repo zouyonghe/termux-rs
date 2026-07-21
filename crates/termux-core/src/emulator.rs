@@ -15,6 +15,7 @@ pub struct Terminal {
     utf8: Utf8Decoder,
     output: Vec<u8>,
     title: Option<String>,
+    version: u64,
 }
 
 impl Terminal {
@@ -29,6 +30,7 @@ impl Terminal {
             utf8: Utf8Decoder::new(),
             output: Vec::new(),
             title: None,
+            version: 0,
         }
     }
 
@@ -48,12 +50,17 @@ impl Terminal {
         self.title.as_deref()
     }
 
+    pub fn snapshot(&self) -> crate::render::RenderSnapshot {
+        self.screen.snapshot(self.version)
+    }
+
     pub fn feed_bytes(&mut self, bytes: &[u8]) {
         for byte in bytes {
             for value in self.utf8.accept(*byte) {
                 self.feed_char(value);
             }
         }
+        self.version = self.version.wrapping_add(1);
     }
 
     pub fn feed_bytes_with_output(&mut self, bytes: &[u8], output: &mut impl TerminalOutput) {
@@ -66,10 +73,12 @@ impl Terminal {
                 }
             }
         }
+        self.version = self.version.wrapping_add(1);
     }
 
     pub fn resize_with_client(&mut self, size: Size, client: &mut impl TerminalSessionClient) {
         self.screen.resize(size);
+        self.version = self.version.wrapping_add(1);
         client.resized(size);
     }
 
@@ -77,6 +86,7 @@ impl Terminal {
         for value in self.utf8.finish() {
             self.feed_char(value);
         }
+        self.version = self.version.wrapping_add(1);
     }
 
     fn feed_char(&mut self, value: char) {
@@ -355,6 +365,27 @@ mod tests {
         terminal.feed_bytes("a枝".as_bytes());
 
         assert_eq!(Some("a枝    ".to_string()), terminal.screen().row_text(0));
+    }
+
+    #[test]
+    fn snapshots_copy_cells_and_advance_version_after_writes_and_resizes() {
+        let mut terminal = Terminal::new(Size::new(3, 1));
+        let initial = terminal.snapshot();
+
+        terminal.feed_bytes("a枝".as_bytes());
+        let written = terminal.snapshot();
+        terminal.resize_with_client(Size::new(4, 2), &mut MockSessionClient::default());
+        let resized = terminal.snapshot();
+
+        assert_eq!(0, initial.version);
+        assert_eq!(1, written.version);
+        assert_eq!(Some("a"), written.rows[0].cells[0].text.as_deref());
+        assert_eq!(Some("枝"), written.rows[0].cells[1].text.as_deref());
+        assert_eq!(2, written.rows[0].cells[1].width);
+        assert!(written.rows[0].cells[2].continuation);
+        assert_eq!(0, written.rows[0].cells[2].width);
+        assert_eq!(2, resized.version);
+        assert_eq!(Size::new(4, 2), resized.size);
     }
 
     #[test]

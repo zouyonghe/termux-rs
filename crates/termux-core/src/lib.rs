@@ -3,6 +3,7 @@ pub mod emulator;
 pub mod fixture;
 pub mod keyboard;
 pub mod queue;
+pub mod render;
 pub mod session;
 pub mod terminal;
 pub mod utf8;

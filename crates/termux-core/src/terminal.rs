@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use crate::render::{RenderCell, RenderRow, RenderSnapshot};
 use crate::wcwidth;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,6 +122,7 @@ impl Cell {
     fn continuation(style: Style) -> Self {
         Self {
             style,
+            width: 0,
             continuation: true,
             ..Self::default()
         }
@@ -302,6 +304,32 @@ impl Screen {
 
     pub fn row_wrapped(&self, row: usize) -> bool {
         self.rows.get(row).is_some_and(|row| row.wrapped)
+    }
+
+    pub fn snapshot(&self, version: u64) -> RenderSnapshot {
+        RenderSnapshot {
+            version,
+            size: self.size,
+            cursor: self.cursor,
+            rows: self
+                .rows
+                .iter()
+                .map(|row| RenderRow {
+                    cells: row
+                        .cells
+                        .iter()
+                        .map(|cell| RenderCell {
+                            text: (!cell.continuation)
+                                .then(|| format!("{}{}", cell.value, cell.combining)),
+                            style: cell.style,
+                            width: cell.width,
+                            continuation: cell.continuation,
+                        })
+                        .collect(),
+                    wrapped: row.wrapped,
+                })
+                .collect(),
+        }
     }
 
     fn write_printable(&mut self, value: char, style: Style, top: usize, bottom: usize) {
