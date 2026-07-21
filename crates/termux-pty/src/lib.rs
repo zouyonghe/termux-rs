@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 
 use portable_pty::{
     Child, CommandBuilder, ExitStatus as NativeExitStatus, MasterPty, PtySize as NativePtySize,
@@ -42,6 +44,25 @@ pub struct PtyExitStatus {
     pub signal: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PtyCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub working_directory: Option<PathBuf>,
+    pub environment: Option<BTreeMap<String, String>>,
+}
+
+impl PtyCommand {
+    pub fn new(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            working_directory: None,
+            environment: None,
+        }
+    }
+}
+
 impl PtyExitStatus {
     pub fn success(&self) -> bool {
         self.code == 0 && self.signal.is_none()
@@ -74,10 +95,25 @@ pub struct UnixPtySession {
 
 impl UnixPtySession {
     pub fn spawn(command: &str, args: &[&str], size: PtySize) -> PtyResult<Self> {
+        let mut configured = PtyCommand::new(command);
+        configured.args = args.iter().map(|argument| (*argument).to_owned()).collect();
+        Self::spawn_command(&configured, size)
+    }
+
+    pub fn spawn_command(command: &PtyCommand, size: PtySize) -> PtyResult<Self> {
         let pair = native_pty_system().openpty(size.native())?;
-        let mut builder = CommandBuilder::new(command);
-        for argument in args {
+        let mut builder = CommandBuilder::new(&command.program);
+        for argument in &command.args {
             builder.arg(argument);
+        }
+        if let Some(directory) = &command.working_directory {
+            builder.cwd(directory);
+        }
+        if let Some(environment) = &command.environment {
+            builder.env_clear();
+            for (name, value) in environment {
+                builder.env(name, value);
+            }
         }
         let child = pair.slave.spawn_command(builder)?;
         drop(pair.slave);
@@ -152,11 +188,13 @@ impl Write for UnixPtySession {
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::{Read, Write};
+    use std::path::PathBuf;
     use std::thread;
     use std::time::Duration;
 
-    use super::{PtySession, PtySize, UnixPtySession};
+    use super::{PtyCommand, PtySession, PtySize, UnixPtySession};
 
     #[test]
     fn spawns_reads_and_resizes_unix_pty_session() {
@@ -225,5 +263,31 @@ mod tests {
 
         assert!(!status.success());
         assert_eq!(status, session.terminate().unwrap());
+    }
+
+    #[test]
+    fn spawns_with_configured_working_directory_and_environment() {
+        let command = PtyCommand {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf '%s:%s' \"$PWD\" \"$ONLY_SET\"".to_string(),
+            ],
+            working_directory: Some(PathBuf::from("/tmp")),
+            environment: Some(BTreeMap::from([(
+                "ONLY_SET".to_string(),
+                "value".to_string(),
+            )])),
+        };
+        let mut session = UnixPtySession::spawn_command(&command, PtySize::new(80, 24)).unwrap();
+
+        let mut output = String::new();
+        session.read_to_string(&mut output).unwrap();
+
+        let expected = format!(
+            "{}:value",
+            PathBuf::from("/tmp").canonicalize().unwrap().display()
+        );
+        assert_eq!(expected, output);
     }
 }
