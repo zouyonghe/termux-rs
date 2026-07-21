@@ -57,3 +57,33 @@ fn runs_ported_termux_app_cursor_back_fixture() {
     let mut terminal = Terminal::new(fixture.size);
     run_fixture(&mut terminal, fixture).unwrap();
 }
+
+#[test]
+fn runs_ported_termux_app_apc_fixture() {
+    let fixture = Fixture {
+        name: "ApcTest.testApcConsumed",
+        size: Size::new(2, 2),
+        input: b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\",
+        expected_rows: &["  ", "  "],
+        expected_cursor: Position { column: 0, row: 0 },
+        expected_output: b"",
+    };
+
+    let mut terminal = Terminal::new(fixture.size);
+    run_fixture(&mut terminal, fixture).unwrap();
+}
+
+#[test]
+fn runs_ported_termux_app_decset_wrap_fixture() {
+    let fixture = Fixture {
+        name: "DecSetTest.testWrapAroundMode disabled",
+        size: Size::new(3, 2),
+        input: b"\x1b[?7labcd",
+        expected_rows: &["abd", "   "],
+        expected_cursor: Position { column: 2, row: 0 },
+        expected_output: b"",
+    };
+
+    let mut terminal = Terminal::new(fixture.size);
+    run_fixture(&mut terminal, fixture).unwrap();
+}

@@ -158,6 +158,7 @@ impl Row {
 pub struct Screen {
     size: Size,
     cursor: Position,
+    auto_wrap: bool,
     pending_wrap: bool,
     scrollback: VecDeque<Row>,
     scrollback_limit: usize,
@@ -173,6 +174,7 @@ impl Screen {
         Self {
             size,
             cursor: Position::default(),
+            auto_wrap: true,
             pending_wrap: false,
             scrollback: VecDeque::with_capacity(scrollback_limit),
             scrollback_limit,
@@ -199,6 +201,13 @@ impl Screen {
             column: self.cursor.column.saturating_add_signed(columns),
             row: self.cursor.row.saturating_add_signed(rows),
         });
+    }
+
+    pub fn set_auto_wrap(&mut self, enabled: bool) {
+        self.auto_wrap = enabled;
+        if !enabled {
+            self.pending_wrap = false;
+        }
     }
 
     pub fn resize(&mut self, size: Size) {
@@ -293,6 +302,9 @@ impl Screen {
         }
 
         let width = width.min(self.size.columns);
+        if self.pending_wrap && !self.auto_wrap {
+            self.pending_wrap = false;
+        }
         if self.pending_wrap || self.cursor.column + width > self.size.columns {
             self.rows[self.cursor.row].wrapped = true;
             self.cursor.column = 0;
@@ -308,7 +320,7 @@ impl Screen {
 
         if self.cursor.column + width < self.size.columns {
             self.cursor.column += width;
-        } else {
+        } else if self.auto_wrap {
             self.cursor.column = self.size.columns - 1;
             self.pending_wrap = true;
         }

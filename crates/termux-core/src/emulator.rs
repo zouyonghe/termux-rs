@@ -1,9 +1,12 @@
 use crate::terminal::{Position, Screen, Size, Style};
 use crate::utf8::Utf8Decoder;
 
+const MAX_CONTROL_STRING_LENGTH: usize = 8192;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Terminal {
     screen: Screen,
+    saved_primary_screen: Option<Screen>,
     style: Style,
     state: ParserState,
     utf8: Utf8Decoder,
@@ -14,6 +17,7 @@ impl Terminal {
     pub fn new(size: Size) -> Self {
         Self {
             screen: Screen::new(size),
+            saved_primary_screen: None,
             style: Style::default(),
             state: ParserState::Ground,
             utf8: Utf8Decoder::new(),
@@ -52,12 +56,41 @@ impl Terminal {
             ParserState::Ground => self.feed_ground(value),
             ParserState::Escape => self.feed_escape(value),
             ParserState::Csi(buffer) => {
-                if value.is_ascii_digit() || value == ';' {
+                if value.is_ascii_digit() || value == ';' || value == '?' {
                     buffer.push(value);
                 } else {
-                    let params = parse_params(buffer);
+                    let (private, params) = match buffer.strip_prefix('?') {
+                        Some(params) => (true, parse_params(params)),
+                        None => (false, parse_params(buffer)),
+                    };
                     self.state = ParserState::Ground;
-                    self.dispatch_csi(value, &params);
+                    self.dispatch_csi(value, &params, private);
+                }
+            }
+            ParserState::ControlString {
+                kind,
+                escaped,
+                length,
+            } => {
+                let mut terminated = false;
+                if *escaped {
+                    if value == '\\' {
+                        terminated = true;
+                    } else {
+                        *escaped = false;
+                        *length += 1;
+                    }
+                } else if *kind == ControlStringKind::Osc && value == '\u{7}' {
+                    terminated = true;
+                } else if value == '\u{1b}' {
+                    *escaped = true;
+                } else {
+                    *length += 1;
+                }
+
+                let discard = terminated || *length > MAX_CONTROL_STRING_LENGTH;
+                if discard {
+                    self.state = ParserState::Ground;
                 }
             }
         }
@@ -72,14 +105,16 @@ impl Terminal {
     }
 
     fn feed_escape(&mut self, value: char) {
-        self.state = if value == '[' {
-            ParserState::Csi(String::new())
-        } else {
-            ParserState::Ground
+        self.state = match value {
+            '[' => ParserState::Csi(String::new()),
+            ']' => ParserState::control_string(ControlStringKind::Osc),
+            'P' => ParserState::control_string(ControlStringKind::Dcs),
+            '_' => ParserState::control_string(ControlStringKind::Apc),
+            _ => ParserState::Ground,
         };
     }
 
-    fn dispatch_csi(&mut self, command: char, params: &[usize]) {
+    fn dispatch_csi(&mut self, command: char, params: &[usize], private: bool) {
         match command {
             'A' => self.screen.move_cursor_by(0, -(amount(params) as isize)),
             'B' => self.screen.move_cursor_by(0, amount(params) as isize),
@@ -89,7 +124,28 @@ impl Terminal {
             'J' => self.erase_display(params),
             'K' => self.erase_line(params),
             'm' => self.select_graphic_rendition(params),
+            'h' if private => self.set_dec_private_mode(params, true),
+            'l' if private => self.set_dec_private_mode(params, false),
             _ => {}
+        }
+    }
+
+    fn set_dec_private_mode(&mut self, params: &[usize], enabled: bool) {
+        for param in params {
+            if *param == 7 {
+                self.screen.set_auto_wrap(enabled);
+            } else if matches!(*param, 47 | 1047 | 1049) {
+                self.set_alternate_screen(enabled);
+            }
+        }
+    }
+
+    fn set_alternate_screen(&mut self, enabled: bool) {
+        if enabled && self.saved_primary_screen.is_none() {
+            let alternate = Screen::new(self.screen.size());
+            self.saved_primary_screen = Some(std::mem::replace(&mut self.screen, alternate));
+        } else if !enabled && let Some(primary) = self.saved_primary_screen.take() {
+            self.screen = primary;
         }
     }
 
@@ -138,6 +194,28 @@ enum ParserState {
     Ground,
     Escape,
     Csi(String),
+    ControlString {
+        kind: ControlStringKind,
+        escaped: bool,
+        length: usize,
+    },
+}
+
+impl ParserState {
+    fn control_string(kind: ControlStringKind) -> Self {
+        Self::ControlString {
+            kind,
+            escaped: false,
+            length: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlStringKind {
+    Osc,
+    Dcs,
+    Apc,
 }
 
 fn parse_params(buffer: &str) -> Vec<usize> {
@@ -216,5 +294,52 @@ mod tests {
         terminal.feed_bytes(b"a\x1b[999zb");
 
         assert_eq!(Some("ab   ".to_string()), terminal.screen().row_text(0));
+    }
+
+    #[test]
+    fn consumes_osc_dcs_and_apc_strings() {
+        let mut terminal = Terminal::new(Size::new(12, 1));
+
+        terminal.feed_bytes(b"a\x1b]0;title\x07b\x1bPignored\x1b\\c\x1b_payload\x1b\\d");
+
+        assert_eq!(
+            Some("abcd        ".to_string()),
+            terminal.screen().row_text(0)
+        );
+    }
+
+    #[test]
+    fn ignores_embedded_escape_in_apc_until_string_terminator() {
+        let mut terminal = Terminal::new(Size::new(12, 1));
+
+        terminal.feed_bytes(b"hello \x1b_some\x13\x1b_ignored\x1b\\ world");
+
+        assert_eq!(
+            Some("hello  world".to_string()),
+            terminal.screen().row_text(0)
+        );
+    }
+
+    #[test]
+    fn decset_wraparound_mode_controls_right_edge_writes() {
+        let mut terminal = Terminal::new(Size::new(3, 2));
+
+        terminal.feed_bytes(b"\x1b[?7labcd");
+
+        assert_eq!(Some("abd".to_string()), terminal.screen().row_text(0));
+        assert_eq!(Some("   ".to_string()), terminal.screen().row_text(1));
+    }
+
+    #[test]
+    fn decset_1049_restores_primary_screen() {
+        let mut terminal = Terminal::new(Size::new(4, 2));
+
+        terminal.feed_bytes(b"t\x1b[?1049h\x1b[Hest\r\nme");
+        assert_eq!(Some("est ".to_string()), terminal.screen().row_text(0));
+        assert_eq!(Some("me  ".to_string()), terminal.screen().row_text(1));
+
+        terminal.feed_bytes(b"\x1b[?1049lry");
+        assert_eq!(Some("try ".to_string()), terminal.screen().row_text(0));
+        assert_eq!(Some("    ".to_string()), terminal.screen().row_text(1));
     }
 }
