@@ -11,6 +11,7 @@ android {
 
     defaultConfig {
         minSdk = 24
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
@@ -31,6 +32,8 @@ kotlin {
 
 dependencies {
     testImplementation(kotlin("test"))
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }
 
 val buildRustJni = tasks.register<Exec>("buildRustJni") {
