@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "termux-ffi"
+version = "0.1.0"
+dependencies = [
+ "termux-core",
+]
+
+[[package]]
 name = "termux-rs"
 version = "0.1.0"
 dependencies = [
