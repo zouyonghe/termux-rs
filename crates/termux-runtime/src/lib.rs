@@ -4,6 +4,73 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PACKAGE_NAME: &str = "com.termux";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootstrapPackageManager {
+    Apt,
+}
+
+impl BootstrapPackageManager {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Apt => "apt",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootstrapVariant {
+    AptAndroid5,
+    AptAndroid7,
+}
+
+impl BootstrapVariant {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AptAndroid5 => "apt-android-5",
+            Self::AptAndroid7 => "apt-android-7",
+        }
+    }
+
+    pub const fn package_manager(self) -> BootstrapPackageManager {
+        BootstrapPackageManager::Apt
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidBootstrapVariant;
+
+impl fmt::Display for InvalidBootstrapVariant {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unsupported Termux bootstrap package variant")
+    }
+}
+
+impl std::error::Error for InvalidBootstrapVariant {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapMetadata {
+    variant: BootstrapVariant,
+}
+
+impl BootstrapMetadata {
+    pub fn from_variant_name(name: &str) -> Result<Self, InvalidBootstrapVariant> {
+        let variant = match name {
+            "apt-android-5" => BootstrapVariant::AptAndroid5,
+            "apt-android-7" => BootstrapVariant::AptAndroid7,
+            _ => return Err(InvalidBootstrapVariant),
+        };
+        Ok(Self { variant })
+    }
+
+    pub const fn variant(self) -> BootstrapVariant {
+        self.variant
+    }
+
+    pub const fn package_manager(self) -> BootstrapPackageManager {
+        self.variant.package_manager()
+    }
+}
+
 pub trait BootstrapStorage {
     fn is_installed(&mut self) -> Result<bool, String>;
     fn prepare_install(&mut self) -> Result<(), String>;
@@ -161,7 +228,8 @@ fn valid_package_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapInstaller, BootstrapState, BootstrapStorage, DEFAULT_PACKAGE_NAME, TermuxPaths,
+        BootstrapInstaller, BootstrapMetadata, BootstrapPackageManager, BootstrapState,
+        BootstrapStorage, BootstrapVariant, DEFAULT_PACKAGE_NAME, TermuxPaths,
     };
 
     struct MockStorage {
@@ -243,6 +311,17 @@ mod tests {
     #[test]
     fn rejects_package_names_that_cannot_be_path_components() {
         assert!(TermuxPaths::new("com.termux/../other").is_err());
+    }
+
+    #[test]
+    fn bootstrap_metadata_only_accepts_supported_variants() {
+        let metadata = BootstrapMetadata::from_variant_name("apt-android-7").unwrap();
+
+        assert_eq!(BootstrapVariant::AptAndroid7, metadata.variant());
+        assert_eq!(BootstrapPackageManager::Apt, metadata.package_manager());
+        assert_eq!("apt", metadata.package_manager().name());
+        assert_eq!("apt-android-7", metadata.variant().name());
+        assert!(BootstrapMetadata::from_variant_name("pacman-android-7").is_err());
     }
 
     #[test]
