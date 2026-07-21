@@ -9,6 +9,8 @@ pub struct Terminal {
     screen: Screen,
     saved_primary_screen: Option<Screen>,
     style: Style,
+    scroll_top: usize,
+    scroll_bottom: usize,
     state: ParserState,
     utf8: Utf8Decoder,
     output: Vec<u8>,
@@ -21,6 +23,8 @@ impl Terminal {
             screen: Screen::new(size),
             saved_primary_screen: None,
             style: Style::default(),
+            scroll_top: 0,
+            scroll_bottom: size.rows,
             state: ParserState::Ground,
             utf8: Utf8Decoder::new(),
             output: Vec::new(),
@@ -133,7 +137,12 @@ impl Terminal {
         if value == '\u{1b}' {
             self.state = ParserState::Escape;
         } else {
-            self.screen.write_char(value, self.style);
+            self.screen.write_char_in_region(
+                value,
+                self.style,
+                self.scroll_top,
+                self.scroll_bottom,
+            );
         }
     }
 
@@ -157,6 +166,7 @@ impl Terminal {
             'J' => self.erase_display(params),
             'K' => self.erase_line(params),
             'm' => self.select_graphic_rendition(params),
+            'r' if !private => self.set_scroll_region(params),
             'h' if private => self.set_dec_private_mode(params, true),
             'l' if private => self.set_dec_private_mode(params, false),
             _ => {}
@@ -179,6 +189,17 @@ impl Terminal {
             self.saved_primary_screen = Some(std::mem::replace(&mut self.screen, alternate));
         } else if !enabled && let Some(primary) = self.saved_primary_screen.take() {
             self.screen = primary;
+        }
+    }
+
+    fn set_scroll_region(&mut self, params: &[usize]) {
+        let rows = self.screen.size().rows;
+        let top = params.first().copied().unwrap_or(1).max(1) - 1;
+        let bottom = params.get(1).copied().unwrap_or(rows).min(rows);
+        if top < bottom {
+            self.scroll_top = top;
+            self.scroll_bottom = bottom;
+            self.screen.set_cursor(Position::default());
         }
     }
 
@@ -453,5 +474,18 @@ mod tests {
         terminal.feed_bytes(b"\x1b[?1049lry");
         assert_eq!(Some("try ".to_string()), terminal.screen().row_text(0));
         assert_eq!(Some("    ".to_string()), terminal.screen().row_text(1));
+    }
+
+    #[test]
+    fn decstbm_scrolls_only_inside_vertical_region() {
+        let mut terminal = Terminal::new(Size::new(3, 4));
+
+        terminal.feed_bytes(b"111222333444\x1b[2;4r\x1b[4;1HABCD");
+
+        assert_eq!(Some("111".to_string()), terminal.screen().row_text(0));
+        assert_eq!(Some("333".to_string()), terminal.screen().row_text(1));
+        assert_eq!(Some("ABC".to_string()), terminal.screen().row_text(2));
+        assert_eq!(Some("D  ".to_string()), terminal.screen().row_text(3));
+        assert_eq!(0, terminal.screen().scrollback_len());
     }
 }

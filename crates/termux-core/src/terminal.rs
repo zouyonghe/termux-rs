@@ -233,20 +233,30 @@ impl Screen {
     }
 
     pub fn write_char(&mut self, value: char, style: Style) {
+        self.write_char_in_region(value, style, 0, self.size.rows);
+    }
+
+    pub(crate) fn write_char_in_region(
+        &mut self,
+        value: char,
+        style: Style,
+        top: usize,
+        bottom: usize,
+    ) {
         match value {
             '\r' => {
                 self.cursor.column = 0;
                 self.pending_wrap = false;
             }
             '\n' => {
-                self.line_feed();
+                self.line_feed_in_region(top, bottom);
                 self.pending_wrap = false;
             }
             '\x08' => {
                 self.cursor.column = self.cursor.column.saturating_sub(1);
                 self.pending_wrap = false;
             }
-            _ => self.write_printable(value, style),
+            _ => self.write_printable(value, style, top, bottom),
         }
     }
 
@@ -294,7 +304,7 @@ impl Screen {
         self.rows.get(row).is_some_and(|row| row.wrapped)
     }
 
-    fn write_printable(&mut self, value: char, style: Style) {
+    fn write_printable(&mut self, value: char, style: Style, top: usize, bottom: usize) {
         let width = wcwidth::width(value);
         if width == 0 {
             self.write_combining(value);
@@ -308,7 +318,7 @@ impl Screen {
         if self.pending_wrap || self.cursor.column + width > self.size.columns {
             self.rows[self.cursor.row].wrapped = true;
             self.cursor.column = 0;
-            self.line_feed();
+            self.line_feed_in_region(top, bottom);
             self.pending_wrap = false;
         }
 
@@ -352,20 +362,36 @@ impl Screen {
         row.cells[column] = Cell::default();
     }
 
-    fn line_feed(&mut self) {
-        if self.cursor.row + 1 < self.size.rows {
-            self.cursor.row += 1;
+    fn line_feed_in_region(&mut self, top: usize, bottom: usize) {
+        let top = top.min(self.size.rows - 1);
+        let bottom = bottom.clamp(top + 1, self.size.rows);
+        if (top..bottom).contains(&self.cursor.row) {
+            if self.cursor.row + 1 < bottom {
+                self.cursor.row += 1;
+            } else {
+                self.scroll_up(top, bottom);
+                self.cursor.row = bottom - 1;
+            }
             return;
         }
 
-        let row = self.rows.remove(0);
-        if self.scrollback_limit > 0 {
+        if self.cursor.row + 1 < self.size.rows {
+            self.cursor.row += 1;
+        } else {
+            self.scroll_up(0, self.size.rows);
+            self.cursor.row = self.size.rows - 1;
+        }
+    }
+
+    fn scroll_up(&mut self, top: usize, bottom: usize) {
+        let row = self.rows.remove(top);
+        if top == 0 && bottom == self.size.rows && self.scrollback_limit > 0 {
             if self.scrollback.len() == self.scrollback_limit {
                 self.scrollback.pop_front();
             }
             self.scrollback.push_back(row);
         }
-        self.rows.push(Row::blank(self.size.columns));
+        self.rows.insert(bottom - 1, Row::blank(self.size.columns));
     }
 
     fn clear_row_range(&mut self, row: usize, start_column: usize, end_column: usize) {
