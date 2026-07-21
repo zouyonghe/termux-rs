@@ -46,14 +46,14 @@ pub struct PtyExitStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PtyCommand {
-    pub program: String,
+    pub program: PathBuf,
     pub args: Vec<String>,
     pub working_directory: Option<PathBuf>,
     pub environment: Option<BTreeMap<String, String>>,
 }
 
 impl PtyCommand {
-    pub fn new(program: impl Into<String>) -> Self {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
         Self {
             program: program.into(),
             args: Vec::new(),
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn spawns_with_configured_working_directory_and_environment() {
         let command = PtyCommand {
-            program: "/bin/sh".to_string(),
+            program: PathBuf::from("/bin/sh"),
             args: vec![
                 "-c".to_string(),
                 "printf '%s:%s' \"$PWD\" \"$ONLY_SET\"".to_string(),

@@ -164,6 +164,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "termux-exec"
+version = "0.1.0"
+dependencies = [
+ "termux-pty",
+ "termux-runtime",
+]
+
+[[package]]
 name = "termux-ffi"
 version = "0.1.0"
 dependencies = [

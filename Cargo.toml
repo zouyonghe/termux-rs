@@ -2,6 +2,7 @@
 members = [
     "crates/termux-cli",
     "crates/termux-core",
+    "crates/termux-exec",
     "crates/termux-ffi",
     "crates/termux-pty",
     "crates/termux-render",
