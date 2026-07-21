@@ -4,6 +4,7 @@ members = [
     "crates/termux-core",
     "crates/termux-ffi",
     "crates/termux-pty",
+    "crates/termux-render",
     "crates/termux-runtime",
 ]
 resolver = "3"
