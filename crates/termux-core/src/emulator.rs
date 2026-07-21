@@ -12,6 +12,7 @@ pub struct Terminal {
     state: ParserState,
     utf8: Utf8Decoder,
     output: Vec<u8>,
+    title: Option<String>,
 }
 
 impl Terminal {
@@ -23,6 +24,7 @@ impl Terminal {
             state: ParserState::Ground,
             utf8: Utf8Decoder::new(),
             output: Vec::new(),
+            title: None,
         }
     }
 
@@ -36,6 +38,10 @@ impl Terminal {
 
     pub fn output(&self) -> &[u8] {
         &self.output
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
     }
 
     pub fn feed_bytes(&mut self, bytes: &[u8]) {
@@ -89,6 +95,7 @@ impl Terminal {
                 kind,
                 escaped,
                 length,
+                payload,
             } => {
                 let mut terminated = false;
                 if *escaped {
@@ -96,7 +103,9 @@ impl Terminal {
                         terminated = true;
                     } else {
                         *escaped = false;
-                        *length += 1;
+                        *length += 2;
+                        payload.push('\u{1b}');
+                        payload.push(value);
                     }
                 } else if *kind == ControlStringKind::Osc && value == '\u{7}' {
                     terminated = true;
@@ -104,11 +113,17 @@ impl Terminal {
                     *escaped = true;
                 } else {
                     *length += 1;
+                    payload.push(value);
                 }
 
-                let discard = terminated || *length > MAX_CONTROL_STRING_LENGTH;
-                if discard {
+                let completed = if terminated || *length > MAX_CONTROL_STRING_LENGTH {
+                    Some((*kind, std::mem::take(payload)))
+                } else {
+                    None
+                };
+                if let Some((kind, payload)) = completed {
                     self.state = ParserState::Ground;
+                    self.dispatch_control_string(kind, &payload);
                 }
             }
         }
@@ -167,6 +182,19 @@ impl Terminal {
         }
     }
 
+    fn dispatch_control_string(&mut self, kind: ControlStringKind, payload: &str) {
+        if kind != ControlStringKind::Osc {
+            return;
+        }
+
+        let Some((command, value)) = payload.split_once(';') else {
+            return;
+        };
+        if matches!(command, "0" | "2") {
+            self.title = Some(value.to_owned());
+        }
+    }
+
     fn set_cursor_position(&mut self, params: &[usize]) {
         let row = params.first().copied().unwrap_or(1).max(1) - 1;
         let column = params.get(1).copied().unwrap_or(1).max(1) - 1;
@@ -216,6 +244,7 @@ enum ParserState {
         kind: ControlStringKind,
         escaped: bool,
         length: usize,
+        payload: String,
     },
 }
 
@@ -225,6 +254,7 @@ impl ParserState {
             kind,
             escaped: false,
             length: 0,
+            payload: String::new(),
         }
     }
 }
@@ -378,6 +408,16 @@ mod tests {
             Some("abcd        ".to_string()),
             terminal.screen().row_text(0)
         );
+    }
+
+    #[test]
+    fn osc_sets_terminal_title_with_bel_and_string_terminator() {
+        let mut terminal = Terminal::new(Size::new(3, 2));
+
+        terminal.feed_bytes(b"\x1b]0;Hello\x07");
+        assert_eq!(Some("Hello"), terminal.title());
+        terminal.feed_bytes(b"\x1b]2;Updated\x1b\\");
+        assert_eq!(Some("Updated"), terminal.title());
     }
 
     #[test]
