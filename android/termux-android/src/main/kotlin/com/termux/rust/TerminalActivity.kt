@@ -25,6 +25,7 @@ class TerminalActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private var api: TermuxServiceApi? = null
     private var sessionId: SessionId? = null
+    private val pendingOps = PendingSessionOps()
     private var lastRenderedVersion = -1L
     private var refreshActive = false
     private var exitAnnounced = false
@@ -49,9 +50,8 @@ class TerminalActivity : Activity() {
         if (measured != null && (measured.first != terminalColumns || measured.second != terminalRows)) {
             terminalColumns = measured.first
             terminalRows = measured.second
-            val id = sessionId
-            if (id != null) {
-                api?.resize(id, TerminalDimensions(terminalColumns, terminalRows))
+            dispatchOp { service, id ->
+                service.resize(id, TerminalDimensions(terminalColumns, terminalRows))
             }
         }
     }
@@ -111,11 +111,13 @@ class TerminalActivity : Activity() {
     }
 
     /** Reattach to the restored session if it still exists; create exactly
-     *  one otherwise. Recreation never duplicates or cancels sessions. */
+     *  one otherwise. Recreation never duplicates or cancels sessions.
+     *  Queued pre-bind ops flush here, tagged to the attached session. */
     private fun attachSession() {
         val service = api ?: return
         val restored = sessionId
         if (restored != null && service.session(restored) is AppShellResult.Success) {
+            pendingOps.flush(service, restored)
             return
         }
         val request = AppExecutionRequest(
@@ -125,6 +127,7 @@ class TerminalActivity : Activity() {
             terminalSize = TerminalDimensions(terminalColumns, terminalRows),
         )
         sessionId = (service.createSession(request) as? AppShellResult.Success)?.value
+        sessionId?.let { pendingOps.flush(service, it) }
     }
 
     override fun onStart() {
@@ -140,6 +143,8 @@ class TerminalActivity : Activity() {
     override fun onDestroy() {
         stopRefresh()
         surface.viewTreeObserver.removeOnGlobalLayoutListener(layoutListener)
+        // Cancel queued ops: destroy never replays them into a later session.
+        pendingOps.clear()
         // Unbind only: the session outlives the Activity by contract.
         unbindService(connection)
         api = null
@@ -204,9 +209,23 @@ class TerminalActivity : Activity() {
             event.unicodeChar > 0 -> String(Character.toChars(event.unicodeChar)).encodeToByteArray()
             else -> return false
         }
-        val id = sessionId ?: return false
-        api?.writeInput(id, SessionInput.of(bytes)) ?: return false
+        // Queue until bound; the op replays once against the attached session.
+        dispatchOp { service, id ->
+            service.writeInput(id, SessionInput.of(bytes))
+        }
         return true
+    }
+
+    /** Runs [op] immediately when the service and session are attached,
+     *  otherwise queues it for the flush at attach. */
+    private fun dispatchOp(op: (TermuxServiceApi, SessionId) -> Unit) {
+        val service = api
+        val id = sessionId
+        if (service != null && id != null) {
+            op(service, id)
+        } else {
+            pendingOps.enqueue(sessionId, op)
+        }
     }
 
     private companion object {

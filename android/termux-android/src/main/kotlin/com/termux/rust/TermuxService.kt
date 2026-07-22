@@ -53,6 +53,7 @@ class TermuxService : Service() {
             try {
                 drainPendingRunCommands()
                 core.registry.driveAll()
+                core.registry.reapTerminals()
                 val decision = ForegroundPolicy.decide(
                     summary = core.registry.summary(),
                     sessionCount = (core.registry.sessions() as AppShellResult.Success).value.size,

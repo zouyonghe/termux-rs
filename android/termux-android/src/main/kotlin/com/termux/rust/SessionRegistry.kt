@@ -51,6 +51,7 @@ internal class SessionRegistry(
         var engine: SessionEngine? = null,
         var lifecycle: SessionLifecycle = SessionLifecycle.STARTING,
         var termination: SessionTermination? = null,
+        var closedAtMs: Long? = null,
         var cancellationReason: CancellationReason? = null,
         val pendingInputs: ArrayDeque<SessionInput> = ArrayDeque(),
         var pendingResize: TerminalDimensions? = null,
@@ -347,6 +348,7 @@ internal class SessionRegistry(
                     )
                 }
                 entry.lifecycle = SessionLifecycle.CLOSED
+                entry.closedAtMs = clock()
                 false
             } else if (entry.lifecycle == SessionLifecycle.EXITED && !entry.engineClosed) {
                 true
@@ -359,7 +361,52 @@ internal class SessionRegistry(
             synchronized(lock) {
                 entry.engineClosed = true
                 entry.lifecycle = SessionLifecycle.CLOSED // termination retained
+                entry.closedAtMs = clock()
             }
+        }
+    }
+
+    /**
+     * Owner-thread retention pass, driven by [TermuxService]'s drive loop:
+     *
+     * - EXITED entries are closed immediately to release native/PTY resources;
+     *   their termination remains retained for the Activity exit banner
+     * - CLOSED entries older than [closedRetentionMs] are purged from the
+     *   registry entirely
+     *
+     * Live sessions are never touched; reaping is idempotent and uses the
+     * injected clock, so it is deterministic under test.
+     */
+    fun reapTerminals(
+        closedRetentionMs: Long = DEFAULT_CLOSED_RETENTION_MS,
+    ) {
+        synchronized(lock) {
+            check(!driving) { "reentrant or concurrent drive is forbidden" }
+            driving = true
+        }
+        try {
+            val now = clock()
+            val toClose = synchronized(lock) {
+                entries.values.filter {
+                    it.lifecycle == SessionLifecycle.EXITED &&
+                        !it.closePending
+                }.onEach { it.closePending = true }
+            }
+            toClose.forEach { entry ->
+                try {
+                    driveEntry(entry)
+                } catch (error: Throwable) {
+                    // One failing engine never blocks reaping the rest.
+                }
+            }
+            synchronized(lock) {
+                entries.values.removeAll {
+                    it.lifecycle == SessionLifecycle.CLOSED &&
+                        it.closedAtMs?.let { t -> now - t >= closedRetentionMs } == true
+                }
+            }
+        } finally {
+            synchronized(lock) { driving = false }
         }
     }
 
@@ -369,7 +416,11 @@ internal class SessionRegistry(
     private fun failure(code: AppShellErrorCode, retryable: Boolean): AppShellResult.Failure =
         AppShellResult.Failure(AppShellError(code, retryable))
 
-    private companion object {
+    internal companion object {
         const val DEFAULT_CAPACITY = 32
+
+        /** How long a CLOSED session's termination remains queryable before
+         *  the entry is purged. */
+        const val DEFAULT_CLOSED_RETENTION_MS = 300_000L
     }
 }
