@@ -22,8 +22,31 @@ class TerminalActivityInstrumentedTest {
             scenario.onActivity { activity ->
                 assertTrue(activity.findViewById<android.view.View>(android.R.id.content) != null)
             }
+            var firstId: Long? = null
+            awaitCondition(scenario) { activity -> activity.attachedSessionId != null }
+            scenario.onActivity { activity -> firstId = activity.attachedSessionId }
+
+            // Configuration change: session survives, never duplicated.
             scenario.recreate()
+
+            awaitCondition(scenario) { activity -> activity.attachedSessionId != null }
+            scenario.onActivity { activity ->
+                assertEquals(firstId, activity.attachedSessionId)
+            }
         }
+    }
+
+    private fun awaitCondition(
+        scenario: ActivityScenario<TerminalActivity>,
+        condition: (TerminalActivity) -> Boolean,
+    ) {
+        repeat(150) {
+            var met = false
+            scenario.onActivity { activity -> met = condition(activity) }
+            if (met) return
+            Thread.sleep(20)
+        }
+        throw AssertionError("condition not met in time")
     }
 
     @Test
@@ -85,23 +108,20 @@ class TerminalActivityInstrumentedTest {
 
             awaitText(scenario) { it.contains("BOLD") && it.contains("中") }
 
-            scenario.onActivity { activity ->
+            // Rendering is asynchronous across the service boundary; wait for
+            // the styled frame to be the one on screen before asserting.
+            awaitCondition(scenario) { activity ->
                 val content = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
                 val text = (content.getChildAt(0) as android.widget.TextView).text
-                assertTrue(text is Spanned)
+                if (text !is Spanned) return@awaitCondition false
                 val spanned = text as Spanned
-
-                // The first "BOLD" occurrence is the unstyled command echo;
-                // the styled printf output carries a bold StyleSpan.
                 val boldSpans = spanned
                     .getSpans(0, spanned.length, StyleSpan::class.java)
                     .filter { it.style == Typeface.BOLD }
-                assertTrue("expected a bold StyleSpan in rendered output", boldSpans.isNotEmpty())
-
                 val cursorSpans = spanned
                     .getSpans(0, spanned.length, BackgroundColorSpan::class.java)
                     .filter { it.backgroundColor == Color.DKGRAY }
-                assertTrue("expected a cursor highlight span", cursorSpans.isNotEmpty())
+                boldSpans.isNotEmpty() && cursorSpans.isNotEmpty()
             }
         }
     }
@@ -179,7 +199,7 @@ class TerminalActivityInstrumentedTest {
         repeat(100) {
             var result: Triple<Int, Int, TerminalSnapshot>? = null
             scenario.onActivity { activity ->
-                val snapshot = activity.pumpAndRenderSnapshotForTest()
+                val snapshot = activity.cachedSnapshotForTest()
                 if (snapshot != null &&
                     condition(activity.terminalColumns, activity.terminalRows, snapshot)
                 ) {

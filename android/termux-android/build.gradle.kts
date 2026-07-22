@@ -35,6 +35,7 @@ kotlin {
 }
 
 dependencies {
+    implementation("org.apache.commons:commons-compress:1.26.2")
     testImplementation(kotlin("test"))
     testImplementation("org.robolectric:robolectric:4.15.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

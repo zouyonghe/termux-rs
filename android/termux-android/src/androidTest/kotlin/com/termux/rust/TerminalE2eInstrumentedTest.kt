@@ -99,7 +99,7 @@ class TerminalE2eInstrumentedTest {
         repeat(100) {
             var result: Triple<Int, Int, TerminalSnapshot>? = null
             scenario.onActivity { activity ->
-                val snapshot = activity.pumpAndRenderSnapshotForTest()
+                val snapshot = activity.cachedSnapshotForTest()
                 if (snapshot != null &&
                     condition(activity.terminalColumns, activity.terminalRows, snapshot)
                 ) {
