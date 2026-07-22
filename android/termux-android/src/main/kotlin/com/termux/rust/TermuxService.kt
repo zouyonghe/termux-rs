@@ -83,10 +83,7 @@ class TermuxService : Service() {
         thread.start()
         ownerThread = thread
         ownerHandler = Handler(thread.looper)
-        val bootstrap = BootstrapInstaller(
-            root = filesDir,
-            payload = AssetBootstrapPayloadSource(assets, BOOTSTRAP_ASSET),
-        )
+        val bootstrap = bootstrapInstallerFactory(this)
         core = TermuxServiceCore(registryFactory(), { message, error ->
             Log.e(TAG, message, error)
         }, bootstrap)
@@ -217,6 +214,16 @@ class TermuxService : Service() {
         /** Test hook: swap the registry (fake engines) before service create. */
         internal var registryFactory: () -> SessionRegistry = {
             SessionRegistry(engineFactory = { request, id -> RustSessionEngine(request, id) })
+        }
+
+        /** Production bootstrap installer boundary. Tests inject a fixture
+         *  payload here; the default stays the real asset source (which is
+         *  MISSING until a production archive ships). */
+        internal var bootstrapInstallerFactory: (android.content.Context) -> BootstrapInstaller = { context ->
+            BootstrapInstaller(
+                root = context.filesDir,
+                payload = AssetBootstrapPayloadSource(context.assets, BOOTSTRAP_ASSET),
+            )
         }
     }
 }
