@@ -71,10 +71,13 @@ class TermuxService : Service() {
     /** Test hook: runs one drive-loop iteration synchronously. */
     internal fun runDriveLoopOnceForTest() = driveLoop.run()
 
-    /** Test hook: stops the background drive loop so manual drives cannot
-     *  race it. */
+    /** Test hook: stops the background drive loop AND waits for any
+     *  in-flight pass to finish, so manual drives cannot race it. */
     internal fun stopDriveLoopForTest() {
         ownerHandler?.removeCallbacks(driveLoop)
+        val idle = CountDownLatch(1)
+        ownerHandler?.post { idle.countDown() }
+        idle.await(2, TimeUnit.SECONDS)
     }
 
     override fun onCreate() {
@@ -138,6 +141,10 @@ class TermuxService : Service() {
     }
 
     private fun applyForeground(decision: ForegroundPolicy.Decision) {
+        // API 33+: a denied POST_NOTIFICATIONS never crashes the service and
+        // is always observable — we never pretend the notification posted.
+        notificationPermissionDenied =
+            decision.foregroundRequired && !notificationGate.areNotificationsEnabled(this)
         if (decision.foregroundRequired && !foregroundActive) {
             startForeground(NOTIFICATION_ID, buildNotification(decision.sessionCount))
             foregroundActive = true
@@ -146,13 +153,19 @@ class TermuxService : Service() {
             // corpse is left in the shade after the last live session ends.
             stopForeground(STOP_FOREGROUND_REMOVE)
             foregroundActive = false
-        } else if (decision.foregroundRequired && foregroundActive) {
+        } else if (decision.foregroundRequired && foregroundActive && !notificationPermissionDenied) {
             // Keep the session count current; reposting the same id is
-            // idempotent for the system.
+            // idempotent for the system. Skipped entirely while denied.
             val manager = getSystemService(NotificationManager::class.java)
             manager.notify(NOTIFICATION_ID, buildNotification(decision.sessionCount))
         }
     }
+
+    /** Test/observability hook: true while live work needs foreground but
+     *  POST_NOTIFICATIONS is denied. */
+    internal val notificationPermissionDeniedForTest: Boolean get() = notificationPermissionDenied
+
+    private var notificationPermissionDenied = false
 
     /** Delivers every validated run-command waiting in the handoff queue.
      *  Called on create and after each drive pass on the owner thread. */
@@ -206,6 +219,9 @@ class TermuxService : Service() {
 
         /** Test hook: shorten the destroy wait. */
         internal var destroyTimeoutMs = 5_000L
+
+        /** Notification permission boundary; tests replace with a fake. */
+        internal var notificationGate: NotificationPermissionGate = NotificationPermissionGate.System
 
         /** Same-app access for the exported adapter; null when destroyed. */
         @Volatile
