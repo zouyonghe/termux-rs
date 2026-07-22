@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:theme="@style/Theme.TermuxRust">
+        <activity android:name=".TerminalActivity" android:screenOrientation="unspecified" android:exported="false" />
+    </application>
+</manifest>

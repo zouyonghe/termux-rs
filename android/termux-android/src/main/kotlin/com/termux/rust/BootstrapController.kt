@@ -17,6 +17,8 @@ interface NativeBootstrapBridge {
 
 internal object NativeStatus {
     const val OK = 0
+    const val SESSION_RUNNING = 1
+    const val SESSION_OUTPUT_CLOSED = 2
 }
 
 internal enum class BootstrapState(val value: Int) {

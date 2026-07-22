@@ -33,6 +33,15 @@ pub struct TermuxTerminalSession {
     output: Arc<ByteQueue>,
 }
 
+impl Drop for TermuxTerminalSession {
+    /// Reap the child if it is still running so freeing a session handle
+    /// never leaves a zombie behind. `terminate` is a no-op when the child
+    /// already exited (the exit status is cached).
+    fn drop(&mut self) {
+        let _ = self.pty.terminate();
+    }
+}
+
 struct NoopSessionClient;
 
 impl TerminalSessionClient for NoopSessionClient {
@@ -548,16 +557,74 @@ pub unsafe extern "C" fn termux_terminal_free(handle: *mut TermuxTerminal) {
     }));
 }
 
+const SNAPSHOT_FLAG_CONTINUATION: u8 = 1;
+const SNAPSHOT_FLAG_BOLD: u8 = 2;
+const SNAPSHOT_FLAG_ITALIC: u8 = 4;
+const SNAPSHOT_FLAG_UNDERLINE: u8 = 8;
+const SNAPSHOT_FLAG_INVERSE: u8 = 16;
+
+/// Encodes the terminal render snapshot in the platform-neutral `TRS1`
+/// binary format consumed by the Android renderer:
+///
+/// - 4 bytes magic `TRS1`
+/// - `u64` snapshot version (little-endian)
+/// - `u32` column count, `u32` row count (little-endian)
+/// - `u32` cursor column, `u32` cursor row (little-endian)
+/// - per row: `u8` wrapped flag, then per cell: `u8` style/continuation
+///   flags, `u8` cell width, `u16` UTF-8 text length, text bytes
 fn render_terminal(terminal: &Terminal) -> Vec<u8> {
-    (0..terminal.screen().size().rows)
-        .filter_map(|row| terminal.screen().row_text(row))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .into_bytes()
+    let snapshot = terminal.snapshot();
+    let mut rendered = Vec::new();
+    rendered.extend_from_slice(b"TRS1");
+    rendered.extend_from_slice(&snapshot.version.to_le_bytes());
+    rendered.extend_from_slice(&(snapshot.size.columns as u32).to_le_bytes());
+    rendered.extend_from_slice(&(snapshot.size.rows as u32).to_le_bytes());
+    rendered.extend_from_slice(&(snapshot.cursor.column as u32).to_le_bytes());
+    rendered.extend_from_slice(&(snapshot.cursor.row as u32).to_le_bytes());
+    for row in &snapshot.rows {
+        rendered.push(u8::from(row.wrapped));
+        for cell in &row.cells {
+            let mut flags = 0;
+            if cell.continuation {
+                flags |= SNAPSHOT_FLAG_CONTINUATION;
+            }
+            if cell.style.bold {
+                flags |= SNAPSHOT_FLAG_BOLD;
+            }
+            if cell.style.italic {
+                flags |= SNAPSHOT_FLAG_ITALIC;
+            }
+            if cell.style.underline {
+                flags |= SNAPSHOT_FLAG_UNDERLINE;
+            }
+            if cell.style.inverse {
+                flags |= SNAPSHOT_FLAG_INVERSE;
+            }
+            rendered.push(flags);
+            rendered.push(cell.width as u8);
+            let text = cell.text.as_deref().unwrap_or_default();
+            // The protocol stores cell text length as `u16`; bound oversized
+            // combining sequences at a UTF-8 boundary so the payload always
+            // matches its declared length.
+            let bounded = if text.len() > u16::MAX as usize {
+                let mut end = u16::MAX as usize;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &text[..end]
+            } else {
+                text
+            };
+            rendered.extend_from_slice(&(bounded.len() as u16).to_le_bytes());
+            rendered.extend_from_slice(bounded.as_bytes());
+        }
+    }
+    rendered
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{Size, Terminal};
     use super::{
         TERMUX_BOOTSTRAP_FAILED, TERMUX_BOOTSTRAP_INSTALLED, TERMUX_BOOTSTRAP_INSTALLING,
         TERMUX_INVALID_ARGUMENT, TERMUX_OK, termux_bootstrap_begin, termux_bootstrap_complete,
@@ -573,6 +640,87 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    struct SnapshotCell {
+        flags: u8,
+        width: u8,
+        text: String,
+    }
+
+    struct SnapshotRow {
+        wrapped: bool,
+        cells: Vec<SnapshotCell>,
+    }
+
+    struct Snapshot {
+        version: u64,
+        columns: u32,
+        rows: u32,
+        cursor: (u32, u32),
+        grid: Vec<SnapshotRow>,
+    }
+
+    impl Snapshot {
+        fn decode(rendered: &[u8]) -> Self {
+            assert_eq!(b"TRS1", rendered.get(..4).unwrap_or_default());
+            let version = u64::from_le_bytes(rendered[4..12].try_into().unwrap());
+            let columns = u32::from_le_bytes(rendered[12..16].try_into().unwrap());
+            let rows = u32::from_le_bytes(rendered[16..20].try_into().unwrap());
+            let cursor = (
+                u32::from_le_bytes(rendered[20..24].try_into().unwrap()),
+                u32::from_le_bytes(rendered[24..28].try_into().unwrap()),
+            );
+            let mut offset = 28;
+            let grid = (0..rows)
+                .map(|_| {
+                    let wrapped = rendered[offset] != 0;
+                    offset += 1;
+                    let cells = (0..columns)
+                        .map(|_| {
+                            let flags = rendered[offset];
+                            let width = rendered[offset + 1];
+                            let length = u16::from_le_bytes(
+                                rendered[offset + 2..offset + 4].try_into().unwrap(),
+                            ) as usize;
+                            offset += 4;
+                            let text =
+                                String::from_utf8(rendered[offset..offset + length].to_vec())
+                                    .unwrap();
+                            offset += length;
+                            SnapshotCell { flags, width, text }
+                        })
+                        .collect();
+                    SnapshotRow { wrapped, cells }
+                })
+                .collect();
+            assert_eq!(rendered.len(), offset);
+            Self {
+                version,
+                columns,
+                rows,
+                cursor,
+                grid,
+            }
+        }
+
+        fn row_text(&self, row: usize) -> String {
+            self.grid[row]
+                .cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect()
+        }
+    }
+
+    fn assert_snapshot(rendered: &[u8], columns: u32, rows: u32, text: &str) {
+        let snapshot = Snapshot::decode(rendered);
+        assert!(snapshot.version > 0);
+        assert_eq!(columns, snapshot.columns);
+        assert_eq!(rows, snapshot.rows);
+        assert!(snapshot.cursor.0 < columns);
+        assert!(snapshot.cursor.1 < rows);
+        assert!((0..rows as usize).any(|row| snapshot.row_text(row).contains(text)));
+    }
+
     #[test]
     fn creates_feeds_renders_and_frees_a_terminal() {
         let handle = termux_terminal_create(4, 2);
@@ -586,7 +734,7 @@ mod tests {
         assert_eq!(required, unsafe {
             termux_terminal_render(handle, rendered.as_mut_ptr(), rendered.len())
         });
-        assert_eq!(b"hi  \n    ", rendered.as_slice());
+        assert_snapshot(&rendered, 4, 2, "hi");
 
         unsafe { termux_terminal_free(handle) };
     }
@@ -681,7 +829,7 @@ mod tests {
         assert_eq!(required, unsafe {
             termux_terminal_session_render(handle, rendered.as_mut_ptr(), rendered.len())
         });
-        assert_eq!(b"hi  \n    ", rendered.as_slice());
+        assert_snapshot(&rendered, 4, 2, "hi");
         assert_eq!(TERMUX_OK, unsafe {
             termux_terminal_session_resize(handle, 6, 3)
         });
@@ -743,7 +891,72 @@ mod tests {
         let mut rendered = vec![0; required];
         unsafe { termux_terminal_session_render(handle, rendered.as_mut_ptr(), rendered.len()) };
 
-        assert!(rendered.starts_with(b"bridged"));
+        let snapshot = Snapshot::decode(&rendered);
+        assert!(snapshot.row_text(0).starts_with("bridged"));
         unsafe { termux_terminal_session_free(handle) };
+    }
+
+    #[test]
+    fn render_encodes_styles_wide_cells_and_continuations() {
+        let handle = termux_terminal_create(4, 1);
+        assert!(!handle.is_null());
+
+        assert_eq!(TERMUX_OK, unsafe {
+            termux_terminal_feed(handle, "\x1b[1m中".as_ptr(), "\x1b[1m中".len())
+        });
+        let required = unsafe { termux_terminal_render(handle, std::ptr::null_mut(), 0) };
+        let mut rendered = vec![0; required];
+        assert_eq!(required, unsafe {
+            termux_terminal_render(handle, rendered.as_mut_ptr(), rendered.len())
+        });
+
+        let snapshot = Snapshot::decode(&rendered);
+        assert!(!snapshot.grid[0].wrapped);
+        let wide = &snapshot.grid[0].cells[0];
+        assert_eq!("中", wide.text);
+        assert_eq!(2, wide.width);
+        assert_eq!(
+            super::SNAPSHOT_FLAG_BOLD,
+            wide.flags & super::SNAPSHOT_FLAG_BOLD
+        );
+        assert_eq!(0, wide.flags & super::SNAPSHOT_FLAG_CONTINUATION);
+        let continuation = &snapshot.grid[0].cells[1];
+        assert_ne!(0, continuation.flags & super::SNAPSHOT_FLAG_CONTINUATION);
+        assert_eq!(0, continuation.width);
+
+        unsafe { termux_terminal_free(handle) };
+    }
+
+    #[test]
+    fn render_bounds_oversized_cell_text_without_malforming_snapshot() {
+        let mut terminal = Terminal::new(Size::new(4, 1));
+        let mut input = String::from("e");
+        input.push_str(&"\u{301}".repeat(40_000));
+        assert!(input.len() > u16::MAX as usize);
+        terminal.feed_bytes(input.as_bytes());
+
+        let rendered = super::render_terminal(&terminal);
+        let snapshot = Snapshot::decode(&rendered);
+        let cell = &snapshot.grid[0].cells[0];
+        assert!(cell.text.len() <= u16::MAX as usize);
+        assert!(cell.text.starts_with('e'));
+    }
+
+    #[test]
+    fn freeing_a_running_session_reaps_the_child_via_drop() {
+        let command = CString::new("/bin/sh").unwrap();
+        let argument = CString::new("-c").unwrap();
+        let script = CString::new("sleep 30").unwrap();
+        let arguments = [argument.as_ptr(), script.as_ptr()];
+        let handle = unsafe {
+            termux_terminal_session_create(command.as_ptr(), arguments.as_ptr(), 2, 4, 2)
+        };
+        assert!(!handle.is_null());
+
+        // Drop kills and waits for the child; without it this call would
+        // leave a zombie and the test suite would hang on process cleanup.
+        let started = std::time::Instant::now();
+        unsafe { termux_terminal_session_free(handle) };
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

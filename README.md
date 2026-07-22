@@ -19,8 +19,8 @@ adapters.
 | Terminal core | Active | Screen buffer, scrollback, Unicode cell width, ANSI/DEC parsing, OSC titles, alternate screen, scroll regions |
 | Input | Active | Legacy xterm-style and Kitty keyboard encoders |
 | Process transport | Active | Bounded blocking byte queue and Unix PTY prototype |
-| Android boundary | Active | Opaque C ABI terminal handle with host round-trip coverage |
-| Android application | Planned | JNI adapter, renderer, service lifecycle, bootstrap installation |
+| Android boundary | Active | Opaque C ABI terminal/session handles, TRS1 render snapshots, bootstrap state machine |
+| Android application | Active (vertical slice) | Single-session debug terminal: PTY shell, styled rendering, keyboard input, resize, lifecycle/exit handling — see `android/README.md` |
 
 ## Crate Map
 
@@ -89,16 +89,17 @@ parity reference exists. Before opening a change:
 4. Document any deliberate divergence from `termux-app` behavior.
 
 GitHub Actions runs the same formatting, test, and clippy checks on every push
-and pull request. Android/NDK builds will become a separate CI gate once an
-Android adapter exists.
+and pull request. The Android adapter now exists; wiring its NDK build and
+emulator tests into CI as a separate gate is still pending.
 
 ## Roadmap
 
 - [x] Terminal buffer, parser, Unicode, keyboard, and parity fixtures
 - [x] Runtime paths, session traits, C ABI, byte queue, and Unix PTY prototype
-- [ ] Platform-neutral render snapshot
-- [ ] Bootstrap installer state machine
-- [ ] Android app shell and JNI adapter
+- [x] Platform-neutral render snapshot (TRS1)
+- [x] Bootstrap installer state machine
+- [x] Android terminal vertical slice (single session) — `android/README.md`
+- [ ] TermuxService handoff, multi-session, grid renderer, package environment
 
 ## Upstream
 
