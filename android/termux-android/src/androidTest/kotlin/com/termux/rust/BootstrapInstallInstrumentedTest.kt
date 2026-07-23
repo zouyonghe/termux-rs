@@ -9,11 +9,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Verifies the install machinery end to end on device: a fixture archive is
- * installed into app-private storage and the extracted artifact actually
- * executes. This validates extraction/permissions only — the repository
- * carries no production bootstrap payload, and on-device installs of the
- * real archive still fail observably with MISSING.
+ * Verifies the install machinery end to end on device: fixture and production
+ * archives are installed into app-private storage and extracted artifacts
+ * actually execute.
  */
 @RunWith(AndroidJUnit4::class)
 class BootstrapInstallInstrumentedTest {
@@ -36,5 +34,31 @@ class BootstrapInstallInstrumentedTest {
         val output = process.inputStream.bufferedReader().readText().trim()
         assertEquals(0, process.waitFor())
         assertEquals("bootstrap-e2e-ok", output)
+    }
+
+    @Test
+    fun production_asset_has_verified_metadata_and_installs() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(context.filesDir, "bootstrap-production")
+        root.deleteRecursively()
+
+        val installer = BootstrapInstaller(
+            root,
+            AssetBootstrapPayloadSource(context.assets, TermuxService.BOOTSTRAP_ASSET),
+        )
+        installer.installIfNeeded()
+
+        assertEquals(BootstrapInstallState.READY, installer.state())
+        val script = File(root, "usr/bin/hello")
+        assertTrue(script.isFile)
+        assertTrue(script.canExecute())
+        assertEquals("bootstrap-e2e-ok", ProcessBuilder("/system/bin/sh", script.absolutePath)
+            .redirectErrorStream(true)
+            .start()
+            .let { process ->
+                val output = process.inputStream.bufferedReader().readText().trim()
+                assertEquals(0, process.waitFor())
+                output
+            })
     }
 }

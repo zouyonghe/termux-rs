@@ -55,6 +55,24 @@ class BootstrapInstallerTest {
     }
 
     @Test
+    fun upgrade_replaces_previous_prefix_and_records_new_metadata() {
+        val root = tempRoot()
+        val initial = goodZip()
+        BootstrapInstaller(root, ZipPayloadSource(initial, version = "test-1")).installIfNeeded()
+        assertTrue(File(root, "usr/bin/tool").isFile)
+
+        val upgraded = goodZip(entries = 3)
+        val installer = BootstrapInstaller(root, ZipPayloadSource(upgraded, version = "test-2"))
+        installer.installIfNeeded()
+
+        assertEquals(BootstrapInstallState.READY, installer.state())
+        assertFalse(File(root, "usr/bin/tool").exists())
+        assertTrue(File(root, "usr/lib/file-2.txt").isFile)
+        assertFalse(File(root, "usr.old").exists())
+        assertTrue(File(root, "usr/.bootstrap-meta").readText().contains("version=test-2"))
+    }
+
+    @Test
     fun state_never_uses_process_cache_to_mask_a_broken_marker() {
         val root = tempRoot()
         val installer = BootstrapInstaller(root, ZipPayloadSource(goodZip()))
