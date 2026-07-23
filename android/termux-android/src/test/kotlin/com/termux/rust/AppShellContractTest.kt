@@ -20,14 +20,14 @@ class AppShellContractTest {
             workingDirectory = "/data/data/com.termux/files/home",
             target = ExecutionTarget.TERMINAL_SESSION,
             label = "external command",
-            environment = mapOf("LANG" to "C.UTF-8"),
+            environment = mapOf("EDITOR" to "vi"),
             terminalSize = TerminalDimensions(columns = 80, rows = 24),
             timeout = ExecutionTimeout.After(5_000),
         )
 
         assertEquals(caller, (request.origin as RequestOrigin.ExternalRunCommand).caller)
         assertEquals(listOf("-lc", "printf ok"), request.arguments)
-        assertEquals("LANG", request.environment.keys.single())
+        assertEquals("EDITOR", request.environment.keys.single())
         assertTrue(request.stdin!!.contentEquals("input\n".encodeToByteArray()))
         assertEquals(SessionExecutionMode.INTERACTIVE_PTY, request.sessionMode)
         assertTrue(request.sessionMode.acceptsInput)
@@ -56,7 +56,7 @@ class AppShellContractTest {
     fun typed_request_is_an_immutable_value_after_boundary_validation() {
         val arguments = mutableListOf("first")
         val stdin = byteArrayOf(1, 2)
-        val environment = mutableMapOf("LANG" to "C")
+        val environment = mutableMapOf("EDITOR" to "vi")
         val request = AppExecutionRequest(
             origin = RequestOrigin.Internal,
             executable = "/system/bin/sh",
@@ -69,11 +69,11 @@ class AppShellContractTest {
 
         arguments += "mutated"
         stdin[0] = 9
-        environment["LANG"] = "mutated"
+        environment["EDITOR"] = "mutated"
 
         assertEquals(listOf("first"), request.arguments)
         assertTrue(request.stdin!!.contentEquals(byteArrayOf(1, 2)))
-        assertEquals(mapOf("LANG" to "C"), request.environment)
+        assertEquals(mapOf("EDITOR" to "vi"), request.environment)
         assertEquals(
             request,
             AppExecutionRequest(
@@ -82,7 +82,7 @@ class AppShellContractTest {
                 arguments = listOf("first"),
                 stdin = byteArrayOf(1, 2),
                 target = ExecutionTarget.TERMINAL_SESSION,
-                environment = mapOf("LANG" to "C"),
+                environment = mapOf("EDITOR" to "vi"),
                 terminalSize = TerminalDimensions(80, 24),
             ),
         )
@@ -98,6 +98,12 @@ class AppShellContractTest {
         }
         assertFailsWith<IllegalArgumentException> {
             terminalRequest(environment = mapOf("PATH" to "/untrusted"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            terminalRequest(environment = mapOf("TERM" to "dumb"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            terminalRequest(environment = mapOf("LC_ALL" to "C"))
         }
         assertFailsWith<IllegalArgumentException> {
             terminalRequest(environment = mapOf("BAD-NAME" to "value"))

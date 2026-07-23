@@ -3,8 +3,16 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PACKAGE_NAME: &str = "com.termux";
-const PROTECTED_ENVIRONMENT_VARIABLES: [&str; 5] =
-    ["HOME", "PATH", "PREFIX", "TERMUX_APP_PACKAGE", "TMPDIR"];
+const PROTECTED_ENVIRONMENT_VARIABLES: [&str; 8] = [
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PREFIX",
+    "TERM",
+    "TERMUX_APP_PACKAGE",
+    "TMPDIR",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerKind {
@@ -270,8 +278,11 @@ impl TermuxPaths {
     pub fn environment(&self) -> BTreeMap<&'static str, String> {
         BTreeMap::from([
             ("HOME", self.home_dir.display().to_string()),
+            ("LANG", "C.UTF-8".to_string()),
+            ("LC_ALL", "C.UTF-8".to_string()),
             ("PATH", self.bin_dir().display().to_string()),
             ("PREFIX", self.prefix_dir.display().to_string()),
+            ("TERM", "xterm-256color".to_string()),
             ("TERMUX_APP_PACKAGE", self.package_name.clone()),
             ("TMPDIR", self.tmp_dir().display().to_string()),
         ])
@@ -535,12 +546,14 @@ mod tests {
     fn environment_overrides_merge_in_stable_order_without_replacing_termux_values() {
         let paths = TermuxPaths::new(DEFAULT_PACKAGE_NAME).unwrap();
         let overrides = BTreeMap::from([
-            ("LANG".to_string(), "C.UTF-8".to_string()),
-            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("COLORTERM".to_string(), "truecolor".to_string()),
+            ("EDITOR".to_string(), "vi".to_string()),
         ]);
 
         let environment = paths.environment_with_overrides(&overrides).unwrap();
 
+        assert_eq!(Some(&"truecolor".to_string()), environment.get("COLORTERM"));
+        assert_eq!(Some(&"vi".to_string()), environment.get("EDITOR"));
         assert_eq!(Some(&"C.UTF-8".to_string()), environment.get("LANG"));
         assert_eq!(Some(&"xterm-256color".to_string()), environment.get("TERM"));
         assert_eq!(
@@ -549,8 +562,11 @@ mod tests {
         );
         assert_eq!(
             vec![
+                "COLORTERM",
+                "EDITOR",
                 "HOME",
                 "LANG",
+                "LC_ALL",
                 "PATH",
                 "PREFIX",
                 "TERM",
@@ -568,6 +584,21 @@ mod tests {
                 "other".to_string()
             )]))
         );
+        assert_eq!(Some(&"xterm-256color".to_string()), environment.get("TERM"));
+        assert_eq!(Some(&"C.UTF-8".to_string()), environment.get("LANG"));
+        assert_eq!(Some(&"C.UTF-8".to_string()), environment.get("LC_ALL"));
+    }
+
+    #[test]
+    fn shell_locale_and_terminal_defaults_cannot_be_overridden() {
+        let paths = TermuxPaths::new(DEFAULT_PACKAGE_NAME).unwrap();
+        for name in ["TERM", "LANG", "LC_ALL"] {
+            let overrides = BTreeMap::from([(name.to_string(), "other".to_string())]);
+            assert_eq!(
+                Err(ExecutionRequestError::ProtectedEnvironmentVariable(name.to_string())),
+                paths.environment_with_overrides(&overrides)
+            );
+        }
     }
 
     #[test]

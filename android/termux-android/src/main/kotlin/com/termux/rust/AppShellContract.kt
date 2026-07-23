@@ -1,7 +1,16 @@
 package com.termux.rust
 
 private val ENVIRONMENT_NAME = Regex("[A-Za-z_][A-Za-z0-9_]*")
-private val PROTECTED_ENVIRONMENT = setOf("HOME", "PATH", "PREFIX", "TERMUX_APP_PACKAGE", "TMPDIR")
+private val PROTECTED_ENVIRONMENT = setOf(
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PREFIX",
+    "TERM",
+    "TERMUX_APP_PACKAGE",
+    "TMPDIR",
+)
 
 internal data class CallerIdentity(
     val uid: Int,

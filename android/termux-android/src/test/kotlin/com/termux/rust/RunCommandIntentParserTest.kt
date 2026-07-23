@@ -22,7 +22,7 @@ class RunCommandIntentParserTest {
         assertEquals("/system/bin/sh", request.executable)
         assertEquals(listOf("-c", "echo hi"), request.arguments)
         assertEquals("/data/data/com.termux/files/home", request.workingDirectory)
-        assertEquals(mapOf("LANG" to "C.UTF-8"), request.environment)
+        assertEquals(mapOf("EDITOR" to "vi"), request.environment)
         assertEquals(ExecutionTimeout.After(5_000), request.timeout)
         assertEquals(ExecutionTarget.APP_SHELL, request.target)
         assertEquals(SessionExecutionMode.NONINTERACTIVE_APP_SHELL, request.sessionMode)
@@ -135,7 +135,7 @@ class RunCommandIntentParserTest {
         .putExtra(RunCommandIntentParser.EXTRA_PATH, "/system/bin/sh")
         .putExtra(RunCommandIntentParser.EXTRA_ARGUMENTS, arrayOf("-c", "echo hi"))
         .putExtra(RunCommandIntentParser.EXTRA_WORKING_DIRECTORY, "/data/data/com.termux/files/home")
-        .putExtra(RunCommandIntentParser.EXTRA_ENVIRONMENT, arrayOf("LANG=C.UTF-8"))
+        .putExtra(RunCommandIntentParser.EXTRA_ENVIRONMENT, arrayOf("EDITOR=vi"))
         .putExtra(RunCommandIntentParser.EXTRA_TIMEOUT_MS, 5_000)
         .putExtra(RunCommandIntentParser.EXTRA_LABEL, "test")
 
