@@ -15,6 +15,7 @@ import org.robolectric.annotation.Config
 class TermuxServiceLifecycleTest {
     @AfterTest
     fun resetSharedHooks() {
+        TermuxService.registryFactory = TermuxService.defaultNoEnvRegistryFactory
         TermuxService.destroyTimeoutMs = 5_000
     }
 

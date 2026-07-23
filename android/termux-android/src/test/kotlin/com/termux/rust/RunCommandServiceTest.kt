@@ -18,9 +18,7 @@ class RunCommandServiceTest {
     fun reset() {
         PendingRunCommands.clear()
         RunCommandService.termuxServiceStarter = RunCommandService.defaultTermuxServiceStarter
-        TermuxService.registryFactory = {
-            SessionRegistry(engineFactory = { request, id -> RustSessionEngine(request, id) })
-        }
+        TermuxService.registryFactory = TermuxService.defaultNoEnvRegistryFactory
     }
 
     @Test

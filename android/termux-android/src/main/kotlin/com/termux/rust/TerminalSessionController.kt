@@ -2,6 +2,14 @@ package com.termux.rust
 
 interface NativeTerminalSessionBridge {
     fun create(command: String, arguments: List<String>, columns: Int, rows: Int): Long
+    fun createWithEnv(
+        command: String,
+        arguments: List<String>,
+        environment: List<String>,
+        columns: Int,
+        rows: Int,
+    ): Long = create(command, arguments, columns, rows)
+    fun runtimeEnvironment(packageName: String): List<String> = emptyList()
     fun feedOutput(handle: Long, bytes: ByteArray): Int
     fun writeInput(handle: Long, bytes: ByteArray): Int
     fun pumpOutput(handle: Long): Int
@@ -18,8 +26,15 @@ class TerminalSessionController(
     columns: Int,
     rows: Int,
     private val bridge: NativeTerminalSessionBridge = JniTerminalSessionBridge,
+    environment: List<String>? = null,
 ) : AutoCloseable {
-    private var handle = bridge.create(command, arguments, columns, rows).also {
+    private var handle = (
+        if (environment == null) {
+            bridge.create(command, arguments, columns, rows)
+        } else {
+            bridge.createWithEnv(command, arguments, environment, columns, rows)
+        }
+    ).also {
         check(it != 0L) { "Unable to create Rust terminal session" }
     }
 
@@ -85,6 +100,26 @@ internal object JniTerminalSessionBridge : NativeTerminalSessionBridge {
 
     override fun create(command: String, arguments: List<String>, columns: Int, rows: Int) =
         nativeCreate(command, arguments.toTypedArray(), columns, rows)
+
+    override fun createWithEnv(
+        command: String,
+        arguments: List<String>,
+        environment: List<String>,
+        columns: Int,
+        rows: Int,
+    ) = nativeCreateWithEnv(command, arguments.toTypedArray(), environment.toTypedArray(), columns, rows)
+
+    override fun runtimeEnvironment(packageName: String): List<String> {
+        val size = nativeRuntimeEnvironmentSize(packageName)
+        if (size <= 0) return emptyList()
+        val buffer = ByteArray(size)
+        val written = nativeRuntimeEnvironment(packageName, buffer)
+        if (written <= 0) return emptyList()
+        return String(buffer, 0, written, Charsets.UTF_8)
+            .split('\u0000')
+            .filter { it.isNotEmpty() }
+    }
+
     override fun feedOutput(handle: Long, bytes: ByteArray) = nativeFeedOutput(handle, bytes)
     override fun writeInput(handle: Long, bytes: ByteArray) = nativeWriteInput(handle, bytes)
     override fun pumpOutput(handle: Long) = nativePumpOutput(handle)
@@ -99,6 +134,15 @@ internal object JniTerminalSessionBridge : NativeTerminalSessionBridge {
     override fun free(handle: Long) = nativeFree(handle)
 
     private external fun nativeCreate(command: String, arguments: Array<String>, columns: Int, rows: Int): Long
+    private external fun nativeCreateWithEnv(
+        command: String,
+        arguments: Array<String>,
+        environment: Array<String>,
+        columns: Int,
+        rows: Int,
+    ): Long
+    private external fun nativeRuntimeEnvironmentSize(packageName: String): Int
+    private external fun nativeRuntimeEnvironment(packageName: String, output: ByteArray): Int
     private external fun nativeFeedOutput(handle: Long, bytes: ByteArray): Int
     private external fun nativeWriteInput(handle: Long, bytes: ByteArray): Int
     private external fun nativePumpOutput(handle: Long): Int

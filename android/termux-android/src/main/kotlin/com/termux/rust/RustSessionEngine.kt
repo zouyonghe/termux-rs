@@ -9,6 +9,12 @@ import java.nio.ByteOrder
  * registry; every native error is mapped to [SessionEngineException] so the
  * registry can fail the session deterministically.
  *
+ * When [packageName] is provided, the child receives the deterministic
+ * required shell environment (HOME/PREFIX/PATH/TMPDIR/TERM/locale/package
+ * metadata from the Rust runtime) merged with the request's extras —
+ * protected variables always come from the runtime and can never be
+ * replaced by request overrides.
+ *
  * APP_SHELL (noninteractive) requests currently spawn a headless PTY with
  * default 80x24 dimensions — pipe-based spawns are a later milestone.
  */
@@ -16,11 +22,26 @@ internal class RustSessionEngine(
     request: AppExecutionRequest,
     sessionId: SessionId,
     bridge: NativeTerminalSessionBridge = JniTerminalSessionBridge,
+    packageName: String? = null,
 ) : SessionEngine {
     private val controller: TerminalSessionController = run {
         val size = request.terminalSize ?: TerminalDimensions(80, 24)
         try {
-            TerminalSessionController(request.executable, request.arguments, size.columns, size.rows, bridge)
+            if (packageName == null) {
+                TerminalSessionController(request.executable, request.arguments, size.columns, size.rows, bridge)
+            } else {
+                val inherited = System.getenv().map { "${it.key}=${it.value}" }
+                val required = bridge.runtimeEnvironment(packageName)
+                val extras = request.environment.map { "${it.key}=${it.value}" }
+                TerminalSessionController(
+                    request.executable,
+                    request.arguments,
+                    size.columns,
+                    size.rows,
+                    bridge,
+                    environment = inherited + required + extras,
+                )
+            }
         } catch (error: Throwable) {
             throw mapError(error)
         }

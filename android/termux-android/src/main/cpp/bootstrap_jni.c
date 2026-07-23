@@ -12,6 +12,8 @@ extern void termux_bootstrap_free(TermuxBootstrap *handle);
 
 typedef struct TermuxTerminalSession TermuxTerminalSession;
 extern TermuxTerminalSession *termux_terminal_session_create(const char *, const char *const *, size_t, size_t, size_t);
+extern TermuxTerminalSession *termux_terminal_session_create_with_env(const char *, const char *const *, size_t, const char *const *, size_t, size_t, size_t);
+extern size_t termux_runtime_environment(const char *, uint8_t *, size_t);
 extern int32_t termux_terminal_session_feed_output(TermuxTerminalSession *, const uint8_t *, size_t);
 extern int32_t termux_terminal_session_write_input(TermuxTerminalSession *, const uint8_t *, size_t);
 extern int32_t termux_terminal_session_pump_output(TermuxTerminalSession *);
@@ -94,6 +96,61 @@ JNIEXPORT jlong JNICALL Java_com_termux_rust_JniTerminalSessionBridge_nativeCrea
     free(values);
     if (program != NULL) (*env)->ReleaseStringUTFChars(env, command, program);
     return (jlong)(intptr_t)session;
+}
+
+JNIEXPORT jlong JNICALL Java_com_termux_rust_JniTerminalSessionBridge_nativeCreateWithEnv(JNIEnv *env, jobject receiver, jstring command, jobjectArray arguments, jobjectArray environment, jint columns, jint rows) {
+    (void)receiver;
+    if (command == NULL || columns <= 0 || rows <= 0) return 0;
+    const char *program = (*env)->GetStringUTFChars(env, command, NULL);
+    jsize count = arguments == NULL ? 0 : (*env)->GetArrayLength(env, arguments);
+    const char **values = calloc((size_t)count, sizeof(*values));
+    jsize env_count = environment == NULL ? 0 : (*env)->GetArrayLength(env, environment);
+    const char **env_values = calloc((size_t)env_count, sizeof(*env_values));
+    if ((count > 0 && values == NULL) || (env_count > 0 && env_values == NULL)) {
+        free(values);
+        free(env_values);
+        if (program != NULL) (*env)->ReleaseStringUTFChars(env, command, program);
+        return 0;
+    }
+    for (jsize index = 0; program != NULL && index < count; index++) {
+        jstring value = (jstring)(*env)->GetObjectArrayElement(env, arguments, index);
+        values[index] = value == NULL ? NULL : (*env)->GetStringUTFChars(env, value, NULL);
+    }
+    for (jsize index = 0; program != NULL && index < env_count; index++) {
+        jstring value = (jstring)(*env)->GetObjectArrayElement(env, environment, index);
+        env_values[index] = value == NULL ? NULL : (*env)->GetStringUTFChars(env, value, NULL);
+    }
+    TermuxTerminalSession *session = program == NULL ? NULL : termux_terminal_session_create_with_env(program, values, (size_t)count, env_values, (size_t)env_count, (size_t)columns, (size_t)rows);
+    for (jsize index = 0; index < count; index++) if (values[index] != NULL) { jstring value = (jstring)(*env)->GetObjectArrayElement(env, arguments, index); (*env)->ReleaseStringUTFChars(env, value, values[index]); }
+    for (jsize index = 0; index < env_count; index++) if (env_values[index] != NULL) { jstring value = (jstring)(*env)->GetObjectArrayElement(env, environment, index); (*env)->ReleaseStringUTFChars(env, value, env_values[index]); }
+    free(values);
+    free(env_values);
+    if (program != NULL) (*env)->ReleaseStringUTFChars(env, command, program);
+    return (jlong)(intptr_t)session;
+}
+
+JNIEXPORT jint JNICALL Java_com_termux_rust_JniTerminalSessionBridge_nativeRuntimeEnvironmentSize(JNIEnv *env, jobject receiver, jstring packageName) {
+    (void)receiver;
+    if (packageName == NULL) return 0;
+    const char *name = (*env)->GetStringUTFChars(env, packageName, NULL);
+    jint size = name == NULL ? 0 : (jint)termux_runtime_environment(name, NULL, 0);
+    if (name != NULL) (*env)->ReleaseStringUTFChars(env, packageName, name);
+    return size;
+}
+
+JNIEXPORT jint JNICALL Java_com_termux_rust_JniTerminalSessionBridge_nativeRuntimeEnvironment(JNIEnv *env, jobject receiver, jstring packageName, jbyteArray output) {
+    (void)receiver;
+    if (packageName == NULL || output == NULL) return 0;
+    const char *name = (*env)->GetStringUTFChars(env, packageName, NULL);
+    jsize length = (*env)->GetArrayLength(env, output);
+    jbyte *data = (*env)->GetByteArrayElements(env, output, NULL);
+    jint written = 0;
+    if (name != NULL && data != NULL) {
+        written = (jint)termux_runtime_environment(name, (uint8_t *)data, (size_t)length);
+    }
+    if (data != NULL) (*env)->ReleaseByteArrayElements(env, output, data, 0);
+    if (name != NULL) (*env)->ReleaseStringUTFChars(env, packageName, name);
+    return written;
 }
 
 static jint session_bytes(JNIEnv *env, jlong handle, jbyteArray bytes, int input) {

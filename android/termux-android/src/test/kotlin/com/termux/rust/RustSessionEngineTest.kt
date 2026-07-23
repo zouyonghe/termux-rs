@@ -31,6 +31,49 @@ class RustSessionEngineTest {
     }
 
     @Test
+    fun merges_required_runtime_environment_with_request_extras() {
+        val bridge = FakeBridge()
+        bridge.runtimeEnvironmentResult = listOf(
+            "HOME=/data/data/com.termux.rust/files/home",
+            "PREFIX=/data/data/com.termux.rust/files/usr",
+            "PATH=/data/data/com.termux.rust/files/usr/bin",
+            "TMPDIR=/data/data/com.termux.rust/files/usr/tmp",
+            "TERM=xterm-256color",
+            "LANG=C.UTF-8",
+            "LC_ALL=C.UTF-8",
+            "TERMUX_APP_PACKAGE=com.termux.rust",
+            "TERMUX_APP_PACKAGE_MANAGER=apt",
+            "TERMUX_APP_PACKAGE_VARIANT=apt-android-7",
+        )
+        RustSessionEngine(
+            request = AppExecutionRequest(
+                origin = RequestOrigin.Internal,
+                executable = "/system/bin/sh",
+                target = ExecutionTarget.TERMINAL_SESSION,
+                terminalSize = TerminalDimensions(80, 24),
+                environment = mapOf("EDITOR" to "vi", "CUSTOM_FLAG" to "1"),
+            ),
+            sessionId = SessionId(1),
+            bridge = bridge,
+            packageName = "com.termux.rust",
+        )
+
+        assertTrue(bridge.usedCreateWithEnv)
+        val environment = bridge.createdEnvironment
+            .map { it.substringBefore('=') to it.substringAfter('=') }
+            .toMap()
+        assertEquals("/data/data/com.termux.rust/files/home", environment["HOME"])
+        assertEquals("/data/data/com.termux.rust/files/usr", environment["PREFIX"])
+        assertEquals("xterm-256color", environment["TERM"])
+        assertEquals("C.UTF-8", environment["LANG"])
+        assertEquals("apt", environment["TERMUX_APP_PACKAGE_MANAGER"])
+        assertEquals("apt-android-7", environment["TERMUX_APP_PACKAGE_VARIANT"])
+        // Request extras merge in; protected values come from the runtime.
+        assertEquals("vi", environment["EDITOR"])
+        assertEquals("1", environment["CUSTOM_FLAG"])
+    }
+
+    @Test
     fun app_shell_requests_spawn_headless_with_default_dimensions() {
         val bridge = FakeBridge()
         RustSessionEngine(
@@ -139,6 +182,9 @@ class RustSessionEngineTest {
         var createdArguments: List<String>? = null
         var createdColumns = 0
         var createdRows = 0
+        var usedCreateWithEnv = false
+        var createdEnvironment: List<String> = emptyList()
+        var runtimeEnvironmentResult: List<String> = emptyList()
         var written: ByteArray? = null
         var lastResize: Pair<Int, Int>? = null
         var terminateCount = 0
@@ -157,6 +203,20 @@ class RustSessionEngineTest {
             createdRows = rows
             return 1L
         }
+
+        override fun createWithEnv(
+            command: String,
+            arguments: List<String>,
+            environment: List<String>,
+            columns: Int,
+            rows: Int,
+        ): Long {
+            usedCreateWithEnv = true
+            createdEnvironment = environment
+            return create(command, arguments, columns, rows)
+        }
+
+        override fun runtimeEnvironment(packageName: String): List<String> = runtimeEnvironmentResult
         override fun feedOutput(handle: Long, bytes: ByteArray) = ioStatus
         override fun writeInput(handle: Long, bytes: ByteArray): Int {
             written = bytes

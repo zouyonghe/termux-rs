@@ -82,6 +82,7 @@ class RestoringAttachRetryTest {
         // Restore completes afterwards: the cancelled retry must not fire,
         // and nothing is ever created for the cancelled attempt.
         core.restoreSessions({ apply -> apply() })
+        core.awaitRestoreForTest()
         shadowOf(android.os.Looper.getMainLooper()).idleFor(2, TimeUnit.SECONDS)
 
         assertNull(activity.sessionId)

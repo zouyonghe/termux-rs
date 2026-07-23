@@ -25,6 +25,13 @@ class TerminalActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     internal var api: TermuxServiceApi? = null
     internal var sessionId: SessionId? = null
+        set(value) {
+            if (field != value) {
+                lastRenderedVersion = -1L
+                exitBanner = null
+            }
+            field = value
+        }
     private val pendingOps = PendingSessionOps()
     private var lastRenderedVersion = -1L
     private var refreshActive = false
@@ -119,7 +126,6 @@ class TerminalActivity : Activity() {
      *  Queued pre-bind ops flush here, tagged to the attached session. */
     internal fun attachSession() {
         val service = api ?: return
-        val previousId = sessionId
         val restored = sessionId
         if (restored != null && service.session(restored) is AppShellResult.Success) {
             pendingOps.flush(service, restored)
@@ -135,11 +141,6 @@ class TerminalActivity : Activity() {
             is AppShellResult.Success -> {
                 sessionId = created.value
                 attachRetryCount = 0
-                // Any attached id change clears the old banner; it is rebuilt
-                // from the NEW session's own termination only.
-                if (sessionId != previousId) {
-                    exitBanner = null
-                }
                 sessionId?.let { pendingOps.flush(service, it) }
             }
             is AppShellResult.Failure -> {

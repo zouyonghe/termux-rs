@@ -23,9 +23,7 @@ import org.robolectric.Shadows.shadowOf
 class PermissionHardeningTest {
     @AfterTest
     fun reset() {
-        TermuxService.registryFactory = {
-            SessionRegistry(engineFactory = { request, id -> RustSessionEngine(request, id) })
-        }
+        TermuxService.registryFactory = TermuxService.defaultNoEnvRegistryFactory
     }
 
     // --- manifest / least-privilege surface ---------------------------------

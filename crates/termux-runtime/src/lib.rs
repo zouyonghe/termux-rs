@@ -607,7 +607,9 @@ mod tests {
         ] {
             let overrides = BTreeMap::from([(name.to_string(), "other".to_string())]);
             assert_eq!(
-                Err(ExecutionRequestError::ProtectedEnvironmentVariable(name.to_string())),
+                Err(ExecutionRequestError::ProtectedEnvironmentVariable(
+                    name.to_string()
+                )),
                 paths.environment_with_overrides(&overrides)
             );
         }

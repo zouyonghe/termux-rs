@@ -45,9 +45,7 @@ class AppShellE2eInstrumentedTest {
         runCatching { File(context.filesDir, "usr").deleteRecursively() }
         runCatching { File(context.filesDir, ".bootstrap.lock").delete() }
         runCatching { File(context.filesDir, "session-state.bin").delete() }
-        TermuxService.registryFactory = {
-            SessionRegistry(engineFactory = { request, id -> RustSessionEngine(request, id) })
-        }
+        TermuxService.registryFactory = TermuxService.defaultNoEnvRegistryFactory
         TermuxService.bootstrapInstallerFactory = { ctx ->
             BootstrapInstaller(
                 root = ctx.filesDir,
@@ -61,9 +59,7 @@ class AppShellE2eInstrumentedTest {
     @Test
     fun app_shell_end_to_end() {
         val zipBytes = context.assets.open("e2e-bootstrap.zip").use { it.readBytes() }
-        TermuxService.registryFactory = {
-            SessionRegistry(engineFactory = { request, id -> RustSessionEngine(request, id) })
-        }
+        TermuxService.registryFactory = TermuxService.defaultNoEnvRegistryFactory
         TermuxService.bootstrapInstallerFactory = { ctx ->
             BootstrapInstaller(ctx.filesDir, ZipPayloadSource(zipBytes)).also { installedBootstrap = it }
         }

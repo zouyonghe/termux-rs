@@ -24,9 +24,7 @@ class TermuxServiceRestoreTest {
 
     @AfterTest
     fun reset() {
-        TermuxService.registryFactory = {
-            SessionRegistry(engineFactory = { request, id -> RustSessionEngine(request, id) })
-        }
+        TermuxService.registryFactory = TermuxService.defaultNoEnvRegistryFactory
         TermuxService.stateStoreFactory = { context ->
             SessionStateStore(File(context.filesDir, "session-state.bin"))
         }

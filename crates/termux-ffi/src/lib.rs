@@ -89,35 +89,167 @@ pub unsafe extern "C" fn termux_terminal_session_create(
                 }
             })
             .collect::<Option<Vec<_>>>()?;
-        let size = Size::new(columns, rows);
-        let mut pty = UnixPtySession::spawn(
+        create_session_with_environment(
             command,
-            &arguments,
-            PtySize::new(columns as u16, rows as u16),
+            arguments.iter().map(|value| (*value).to_string()).collect(),
+            None,
+            Size::new(columns, rows),
         )
-        .ok()?;
-        let reader = pty.take_reader().ok()?;
-        let output = Arc::new(ByteQueue::new(64 * 1024));
-        let queue = Arc::clone(&output);
-        thread::spawn(move || {
-            let mut reader = reader;
-            let mut buffer = [0; 4096];
-            while let Ok(count) = reader.read(&mut buffer) {
-                if count == 0 || queue.write(&buffer[..count]).is_err() {
-                    break;
-                }
-            }
-            queue.close();
-        });
-        Some(Box::into_raw(Box::new(TermuxTerminalSession {
-            terminal: Terminal::new(size),
-            pty,
-            output,
-        })))
     }))
     .ok()
     .flatten()
     .unwrap_or(std::ptr::null_mut())
+}
+
+/// Creates a session with an explicit process environment (deterministic
+/// required variables merged by the caller; protected values always win).
+///
+/// # Safety
+/// Same contract as [`termux_terminal_session_create`]; `environment` must
+/// contain `environment_count` readable pointers to NUL-terminated `K=V`
+/// strings when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_terminal_session_create_with_env(
+    command: *const std::ffi::c_char,
+    arguments: *const *const std::ffi::c_char,
+    argument_count: usize,
+    environment: *const *const std::ffi::c_char,
+    environment_count: usize,
+    columns: usize,
+    rows: usize,
+) -> *mut TermuxTerminalSession {
+    if command.is_null()
+        || columns == 0
+        || rows == 0
+        || columns > u16::MAX as usize
+        || rows > u16::MAX as usize
+        || (arguments.is_null() && argument_count != 0)
+        || (environment.is_null() && environment_count != 0)
+    {
+        return std::ptr::null_mut();
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let command = unsafe { std::ffi::CStr::from_ptr(command) }.to_str().ok()?;
+        let arguments = if argument_count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(arguments, argument_count) }
+        };
+        let arguments = arguments
+            .iter()
+            .map(|argument| {
+                if argument.is_null() {
+                    None
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(*argument) }.to_str().ok()
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let environment = if environment_count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(environment, environment_count) }
+        };
+        let environment = environment
+            .iter()
+            .map(|entry| {
+                if entry.is_null() {
+                    return None;
+                }
+                let entry = unsafe { std::ffi::CStr::from_ptr(*entry) }.to_str().ok()?;
+                let (name, value) = entry.split_once('=')?;
+                Some((name.to_string(), value.to_string()))
+            })
+            .collect::<Option<std::collections::BTreeMap<_, _>>>()?;
+        create_session_with_environment(
+            command,
+            arguments.iter().map(|value| (*value).to_string()).collect(),
+            Some(environment),
+            Size::new(columns, rows),
+        )
+    }))
+    .ok()
+    .flatten()
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// Serializes the deterministic required shell environment for `package_name`
+/// as NUL-separated `K=V` pairs. Returns the required byte count when
+/// `buffer` is null and `capacity` is zero, 0 on invalid input or insufficient
+/// capacity.
+///
+/// # Safety
+/// `package_name` must be a valid NUL-terminated UTF-8 C string; non-null
+/// `buffer` must be writable for `capacity` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn termux_runtime_environment(
+    package_name: *const std::ffi::c_char,
+    buffer: *mut u8,
+    capacity: usize,
+) -> usize {
+    if package_name.is_null() || (buffer.is_null() && capacity != 0) {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let package_name = unsafe { std::ffi::CStr::from_ptr(package_name) }
+            .to_str()
+            .ok()?;
+        let paths = termux_runtime::TermuxPaths::new(package_name).ok()?;
+        let serialized = paths
+            .environment()
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("\0");
+        if buffer.is_null() && capacity == 0 {
+            return Some(serialized.len());
+        }
+        if capacity < serialized.len() {
+            return None;
+        }
+        unsafe { std::ptr::copy_nonoverlapping(serialized.as_ptr(), buffer, serialized.len()) };
+        Some(serialized.len())
+    }))
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+}
+
+fn create_session_with_environment(
+    command: &str,
+    arguments: Vec<String>,
+    environment: Option<std::collections::BTreeMap<String, String>>,
+    size: Size,
+) -> Option<*mut TermuxTerminalSession> {
+    let pty_command = termux_pty::PtyCommand {
+        program: command.into(),
+        args: arguments,
+        working_directory: None,
+        environment,
+    };
+    let mut pty = UnixPtySession::spawn_command(
+        &pty_command,
+        PtySize::new(size.columns as u16, size.rows as u16),
+    )
+    .ok()?;
+    let reader = pty.take_reader().ok()?;
+    let output = Arc::new(ByteQueue::new(64 * 1024));
+    let queue = Arc::clone(&output);
+    thread::spawn(move || {
+        let mut reader = reader;
+        let mut buffer = [0; 4096];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 || queue.write(&buffer[..count]).is_err() {
+                break;
+            }
+        }
+        queue.close();
+    });
+    Some(Box::into_raw(Box::new(TermuxTerminalSession {
+        terminal: Terminal::new(size),
+        pty,
+        output,
+    })))
 }
 
 /// # Safety
@@ -629,8 +761,9 @@ mod tests {
         TERMUX_BOOTSTRAP_FAILED, TERMUX_BOOTSTRAP_INSTALLED, TERMUX_BOOTSTRAP_INSTALLING,
         TERMUX_INVALID_ARGUMENT, TERMUX_OK, termux_bootstrap_begin, termux_bootstrap_complete,
         termux_bootstrap_create, termux_bootstrap_free, termux_bootstrap_state,
-        termux_terminal_create, termux_terminal_feed, termux_terminal_free, termux_terminal_render,
-        termux_terminal_session_create, termux_terminal_session_feed_output,
+        termux_runtime_environment, termux_terminal_create, termux_terminal_feed,
+        termux_terminal_free, termux_terminal_render, termux_terminal_session_create,
+        termux_terminal_session_create_with_env, termux_terminal_session_feed_output,
         termux_terminal_session_free, termux_terminal_session_pump_output,
         termux_terminal_session_render, termux_terminal_session_resize,
         termux_terminal_session_terminate, termux_terminal_session_try_wait,
@@ -958,5 +1091,110 @@ mod tests {
         let started = std::time::Instant::now();
         unsafe { termux_terminal_session_free(handle) };
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn create_with_env_spawns_child_with_given_environment() {
+        let command = CString::new("/bin/sh").unwrap();
+        let argument = CString::new("-c").unwrap();
+        let script = CString::new("printf env-ok-$MARKER").unwrap();
+        let arguments = [argument.as_ptr(), script.as_ptr()];
+        let marker = CString::new("MARKER=child-sees-this").unwrap();
+        let environment = [marker.as_ptr()];
+        let handle = unsafe {
+            termux_terminal_session_create_with_env(
+                command.as_ptr(),
+                arguments.as_ptr(),
+                arguments.len(),
+                environment.as_ptr(),
+                environment.len(),
+                40,
+                2,
+            )
+        };
+        assert!(!handle.is_null());
+
+        let mut found = false;
+        let mut last_text = String::new();
+        for _ in 0..200 {
+            unsafe { termux_terminal_session_pump_output(handle) };
+            let required =
+                unsafe { termux_terminal_session_render(handle, std::ptr::null_mut(), 0) };
+            if required == 0 {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            let mut rendered = vec![0; required];
+            unsafe {
+                termux_terminal_session_render(handle, rendered.as_mut_ptr(), rendered.len())
+            };
+            let snapshot = Snapshot::decode(&rendered);
+            last_text = (0..snapshot.rows as usize)
+                .map(|row| snapshot.row_text(row))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if last_text.contains("env-ok-child-sees-this") {
+                found = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            found,
+            "child did not see MARKER in its environment; screen was:\n{last_text}"
+        );
+        unsafe { termux_terminal_session_free(handle) };
+    }
+
+    #[test]
+    fn create_with_env_rejects_malformed_entries() {
+        let command = CString::new("/bin/true").unwrap();
+        let malformed = CString::new("MISSING_EQUALS").unwrap();
+        let environment = [malformed.as_ptr()];
+
+        let handle = unsafe {
+            termux_terminal_session_create_with_env(
+                command.as_ptr(),
+                std::ptr::null(),
+                0,
+                environment.as_ptr(),
+                environment.len(),
+                40,
+                2,
+            )
+        };
+
+        assert!(handle.is_null());
+    }
+
+    #[test]
+    fn runtime_environment_serializes_required_variables() {
+        let package = CString::new("com.termux.test").unwrap();
+        let required =
+            unsafe { termux_runtime_environment(package.as_ptr(), std::ptr::null_mut(), 0) };
+        assert!(required > 0);
+        let mut buffer = vec![0; required];
+        assert_eq!(required, unsafe {
+            termux_runtime_environment(package.as_ptr(), buffer.as_mut_ptr(), buffer.len())
+        });
+        let serialized = String::from_utf8(buffer).unwrap();
+        let entries: std::collections::BTreeMap<_, _> = serialized
+            .split('\0')
+            .map(|entry| entry.split_once('=').unwrap())
+            .collect();
+
+        assert_eq!("/data/data/com.termux.test/files/home", entries["HOME"]);
+        assert_eq!("/data/data/com.termux.test/files/usr", entries["PREFIX"]);
+        assert_eq!("/data/data/com.termux.test/files/usr/bin", entries["PATH"]);
+        assert_eq!(
+            "/data/data/com.termux.test/files/usr/tmp",
+            entries["TMPDIR"]
+        );
+        assert_eq!("xterm-256color", entries["TERM"]);
+        assert_eq!("C.UTF-8", entries["LANG"]);
+        assert_eq!("C.UTF-8", entries["LC_ALL"]);
+        assert_eq!("com.termux.test", entries["TERMUX_APP_PACKAGE"]);
+        assert_eq!("apt", entries["TERMUX_APP_PACKAGE_MANAGER"]);
+        assert_eq!("apt-android-7", entries["TERMUX_APP_PACKAGE_VARIANT"]);
     }
 }

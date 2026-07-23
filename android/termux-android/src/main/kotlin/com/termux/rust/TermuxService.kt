@@ -36,6 +36,8 @@ class TermuxService : Service() {
     private var ownerHandler: Handler? = null
     private var foregroundActive = false
     private var bootstrapExecutor: java.util.concurrent.ExecutorService? = null
+    @Volatile
+    private var driveLoopEnabled = true
 
     internal lateinit var core: TermuxServiceCore
         private set
@@ -64,7 +66,7 @@ class TermuxService : Service() {
             } catch (error: Throwable) {
                 Log.e(TAG, "session drive failed; continuing", error)
             } finally {
-                ownerHandler?.postDelayed(this, nextDelay)
+                if (driveLoopEnabled) ownerHandler?.postDelayed(this, nextDelay)
             }
         }
     }
@@ -77,6 +79,7 @@ class TermuxService : Service() {
      *  the restore barrier first (the loop now starts inside restore-apply). */
     internal fun stopDriveLoopForTest() {
         core.awaitRestoreForTest()
+        driveLoopEnabled = false
         ownerHandler?.removeCallbacks(driveLoop)
         val idle = CountDownLatch(1)
         ownerHandler?.post { idle.countDown() }
@@ -98,11 +101,18 @@ class TermuxService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        driveLoopEnabled = true
         val thread = HandlerThread("termux-service-owner")
         thread.start()
         ownerThread = thread
         ownerHandler = Handler(thread.looper)
         val bootstrap = bootstrapInstallerFactory(this)
+        val registryFactory =
+            if (registryFactory === defaultNoEnvRegistryFactory) {
+                defaultRegistryFactory(this)
+            } else {
+                registryFactory
+            }
         core = TermuxServiceCore(registryFactory(), { message, error ->
             Log.e(TAG, message, error)
         }, bootstrap, stateStoreFactory(this))
@@ -137,6 +147,7 @@ class TermuxService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
+        driveLoopEnabled = false
         ownerHandler?.removeCallbacks(driveLoop)
         val handler = ownerHandler
         if (::core.isInitialized && handler != null) {
@@ -255,9 +266,21 @@ class TermuxService : Service() {
         @Volatile
         internal var instance: TermuxService? = null
 
-        /** Test hook: swap the registry (fake engines) before service create. */
-        internal var registryFactory: () -> SessionRegistry = {
+        internal val defaultNoEnvRegistryFactory: () -> SessionRegistry = {
             SessionRegistry(engineFactory = { request, id -> RustSessionEngine(request, id) })
+        }
+
+        /** Test hook: swap the registry (fake engines) before service create. */
+        internal var registryFactory: () -> SessionRegistry = defaultNoEnvRegistryFactory
+
+        /** Default registry factory: real engines with the deterministic
+         *  shell environment for this app's package. */
+        internal fun defaultRegistryFactory(context: android.content.Context): () -> SessionRegistry = {
+            java.io.File(context.filesDir, "home").mkdirs()
+            java.io.File(context.filesDir, "usr/tmp").mkdirs()
+            SessionRegistry(engineFactory = { request, id ->
+                RustSessionEngine(request, id, packageName = context.packageName)
+            })
         }
 
         /** Production bootstrap installer boundary. Tests inject a fixture

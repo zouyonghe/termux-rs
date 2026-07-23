@@ -101,10 +101,25 @@ class TerminalActivityInstrumentedTest {
     @Test
     fun renders_styles_wide_characters_and_cursor_on_emulator() {
         ActivityScenario.launch(TerminalActivity::class.java).use { scenario ->
-            val instrumentation = InstrumentationRegistry.getInstrumentation()
-            instrumentation.sendStringSync("printf '\\033[1mBOLD\\033[0m\\n'\n")
-            // 中 as UTF-8 octal escapes: sendStringSync can only inject ASCII.
-            instrumentation.sendStringSync("printf '\\344\\270\\255\\n'\n")
+            awaitCondition(scenario) { activity -> activity.api != null && activity.sessionId != null }
+            scenario.onActivity { activity ->
+                val service = activity.api!!
+                val id = (service.createSession(
+                    AppExecutionRequest(
+                        origin = RequestOrigin.Internal,
+                        executable = "/system/bin/sh",
+                        arguments = listOf(
+                            "-c",
+                            "/system/bin/toybox printf '\\033[1mBOLD\\033[0m\\n'; " +
+                                "/system/bin/toybox printf '\\344\\270\\255\\n'",
+                        ),
+                        target = ExecutionTarget.TERMINAL_SESSION,
+                        terminalSize = TerminalDimensions(activity.terminalColumns, activity.terminalRows),
+                    ),
+                ) as AppShellResult.Success).value
+                activity.sessionId = id
+                activity.exitBanner = null
+            }
 
             awaitText(scenario) { it.contains("BOLD") && it.contains("中") }
 
@@ -166,16 +181,26 @@ class TerminalActivityInstrumentedTest {
         scenario: ActivityScenario<TerminalActivity>,
         condition: (String) -> Boolean,
     ): String {
+        var lastRendered = ""
         repeat(150) {
             var rendered = ""
             scenario.onActivity { activity ->
                 val content = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
                 rendered = (content.getChildAt(0) as android.widget.TextView).text.toString()
             }
+            lastRendered = rendered
             if (condition(rendered)) return rendered
             Thread.sleep(20)
         }
-        throw AssertionError("expected text never rendered")
+        var snapshot: SessionSnapshot? = null
+        scenario.onActivity { activity ->
+            val service = activity.api
+            val id = activity.sessionId
+            if (service != null && id != null) {
+                snapshot = (service.session(id) as? AppShellResult.Success)?.value
+            }
+        }
+        throw AssertionError("expected text never rendered; session=$snapshot; last text:\n$lastRendered")
     }
 
     private fun awaitSurfaceLaidOut(scenario: ActivityScenario<TerminalActivity>) {
