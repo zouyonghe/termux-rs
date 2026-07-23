@@ -310,14 +310,12 @@ mod tests {
         let sleep_pid: u32 = (|| {
             for _ in 0..200 {
                 let mut buffer = [0u8; 1024];
-                if let Ok(count) = reader.read(&mut buffer) {
-                    if count > 0 {
-                        output.push_str(&String::from_utf8_lossy(&buffer[..count]));
-                        if let Some(line) =
-                            output.lines().find(|line| line.starts_with("SLEEPPID="))
-                        {
-                            return line["SLEEPPID=".len()..].trim().parse().ok();
-                        }
+                if let Ok(count) = reader.read(&mut buffer)
+                    && count > 0
+                {
+                    output.push_str(&String::from_utf8_lossy(&buffer[..count]));
+                    if let Some(line) = output.lines().find(|line| line.starts_with("SLEEPPID=")) {
+                        return line["SLEEPPID=".len()..].trim().parse().ok();
                     }
                 }
                 thread::sleep(Duration::from_millis(10));
