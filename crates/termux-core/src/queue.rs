@@ -142,7 +142,7 @@ mod tests {
         });
         queue.write(b"ab").unwrap();
 
-        assert_eq!((QueueRead::Data(2), [b'a', b'b']), receiver.recv().unwrap());
+        assert_eq!((QueueRead::Data(2), *b"ab"), receiver.recv().unwrap());
     }
 
     #[test]
