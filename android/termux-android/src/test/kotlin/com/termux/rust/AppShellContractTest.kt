@@ -106,6 +106,9 @@ class AppShellContractTest {
             terminalRequest(environment = mapOf("LC_ALL" to "C"))
         }
         assertFailsWith<IllegalArgumentException> {
+            terminalRequest(environment = mapOf("TERMUX_APP_PACKAGE_VARIANT" to "other"))
+        }
+        assertFailsWith<IllegalArgumentException> {
             terminalRequest(environment = mapOf("BAD-NAME" to "value"))
         }
         assertFailsWith<IllegalArgumentException> {

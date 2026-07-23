@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PACKAGE_NAME: &str = "com.termux";
-const PROTECTED_ENVIRONMENT_VARIABLES: [&str; 8] = [
+const PROTECTED_ENVIRONMENT_VARIABLES: [&str; 10] = [
     "HOME",
     "LANG",
     "LC_ALL",
@@ -11,6 +11,8 @@ const PROTECTED_ENVIRONMENT_VARIABLES: [&str; 8] = [
     "PREFIX",
     "TERM",
     "TERMUX_APP_PACKAGE",
+    "TERMUX_APP_PACKAGE_MANAGER",
+    "TERMUX_APP_PACKAGE_VARIANT",
     "TMPDIR",
 ];
 
@@ -284,6 +286,8 @@ impl TermuxPaths {
             ("PREFIX", self.prefix_dir.display().to_string()),
             ("TERM", "xterm-256color".to_string()),
             ("TERMUX_APP_PACKAGE", self.package_name.clone()),
+            ("TERMUX_APP_PACKAGE_MANAGER", "apt".to_string()),
+            ("TERMUX_APP_PACKAGE_VARIANT", "apt-android-7".to_string()),
             ("TMPDIR", self.tmp_dir().display().to_string()),
         ])
     }
@@ -571,6 +575,8 @@ mod tests {
                 "PREFIX",
                 "TERM",
                 "TERMUX_APP_PACKAGE",
+                "TERMUX_APP_PACKAGE_MANAGER",
+                "TERMUX_APP_PACKAGE_VARIANT",
                 "TMPDIR"
             ],
             environment.keys().map(String::as_str).collect::<Vec<_>>()
@@ -592,7 +598,13 @@ mod tests {
     #[test]
     fn shell_locale_and_terminal_defaults_cannot_be_overridden() {
         let paths = TermuxPaths::new(DEFAULT_PACKAGE_NAME).unwrap();
-        for name in ["TERM", "LANG", "LC_ALL"] {
+        for name in [
+            "TERM",
+            "LANG",
+            "LC_ALL",
+            "TERMUX_APP_PACKAGE_MANAGER",
+            "TERMUX_APP_PACKAGE_VARIANT",
+        ] {
             let overrides = BTreeMap::from([(name.to_string(), "other".to_string())]);
             assert_eq!(
                 Err(ExecutionRequestError::ProtectedEnvironmentVariable(name.to_string())),
