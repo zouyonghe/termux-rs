@@ -44,6 +44,7 @@ class AppShellE2eInstrumentedTest {
         runCatching { context.stopService(Intent(context, TermuxService::class.java)) }
         runCatching { File(context.filesDir, "usr").deleteRecursively() }
         runCatching { File(context.filesDir, ".bootstrap.lock").delete() }
+        runCatching { File(context.filesDir, "session-state.bin").delete() }
         TermuxService.registryFactory = {
             SessionRegistry(engineFactory = { request, id -> RustSessionEngine(request, id) })
         }

@@ -23,12 +23,11 @@ import android.widget.TextView
 class TerminalActivity : Activity() {
     private lateinit var surface: TextView
     private val handler = Handler(Looper.getMainLooper())
-    private var api: TermuxServiceApi? = null
-    private var sessionId: SessionId? = null
+    internal var api: TermuxServiceApi? = null
+    internal var sessionId: SessionId? = null
     private val pendingOps = PendingSessionOps()
     private var lastRenderedVersion = -1L
     private var refreshActive = false
-    private var exitAnnounced = false
 
     internal var terminalColumns = 80
         private set
@@ -41,6 +40,7 @@ class TerminalActivity : Activity() {
             attachSession()
         }
         override fun onServiceDisconnected(name: ComponentName) {
+            attachCancelled = true
             api = null
         }
     }
@@ -70,6 +70,8 @@ class TerminalActivity : Activity() {
         }
     }
 
+    internal var exitBanner: String? = null
+
     private fun refreshOnce() {
         val service = api ?: return
         val id = sessionId ?: return
@@ -77,12 +79,14 @@ class TerminalActivity : Activity() {
         if (frame != null) {
             lastRenderedVersion = frame.version
             surface.text = TerminalTextRenderer.render(TerminalSnapshotCodec.decode(frame.payload))
+            // A re-render must never wipe an already-announced exit banner.
+            exitBanner?.let { surface.append(it) }
         }
         val snapshot = (service.session(id) as? AppShellResult.Success)?.value ?: return
         val termination = snapshot.termination
-        if (!exitAnnounced && termination is SessionTermination.ProcessExited) {
-            exitAnnounced = true
-            surface.append("\n[process exited with code ${termination.code}]")
+        if (exitBanner == null && termination is SessionTermination.ProcessExited) {
+            exitBanner = "\n[process exited with code ${termination.code}]"
+            surface.append(exitBanner!!)
         }
     }
 
@@ -113,8 +117,9 @@ class TerminalActivity : Activity() {
     /** Reattach to the restored session if it still exists; create exactly
      *  one otherwise. Recreation never duplicates or cancels sessions.
      *  Queued pre-bind ops flush here, tagged to the attached session. */
-    private fun attachSession() {
+    internal fun attachSession() {
         val service = api ?: return
+        val previousId = sessionId
         val restored = sessionId
         if (restored != null && service.session(restored) is AppShellResult.Success) {
             pendingOps.flush(service, restored)
@@ -126,8 +131,42 @@ class TerminalActivity : Activity() {
             target = ExecutionTarget.TERMINAL_SESSION,
             terminalSize = TerminalDimensions(terminalColumns, terminalRows),
         )
-        sessionId = (service.createSession(request) as? AppShellResult.Success)?.value
-        sessionId?.let { pendingOps.flush(service, it) }
+        when (val created = service.createSession(request)) {
+            is AppShellResult.Success -> {
+                sessionId = created.value
+                attachRetryCount = 0
+                // Any attached id change clears the old banner; it is rebuilt
+                // from the NEW session's own termination only.
+                if (sessionId != previousId) {
+                    exitBanner = null
+                }
+                sessionId?.let { pendingOps.flush(service, it) }
+            }
+            is AppShellResult.Failure -> {
+                // RESTORING (retryable): bounded, backing-off, cancellable
+                // retry. Success, unbind, destroy, or a changed session
+                // target cancels further attempts.
+                if (created.error.retryable && !attachCancelled) {
+                    scheduleAttachRetry()
+                }
+            }
+        }
+    }
+
+    private var attachRetryCount = 0
+    internal var attachCancelled = false
+
+    /** Test hook: the handler driving attach retries. */
+    internal fun handlerForTest() = handler
+
+    private fun scheduleAttachRetry() {
+        if (attachRetryCount >= MAX_ATTACH_RETRIES || attachCancelled) return
+        attachRetryCount += 1
+        val delayMs = (ATTACH_RETRY_BASE_MS * attachRetryCount).coerceAtMost(ATTACH_RETRY_CAP_MS)
+        handler.postDelayed(
+            { if (!attachCancelled) attachSession() },
+            delayMs,
+        )
     }
 
     override fun onStart() {
@@ -142,6 +181,7 @@ class TerminalActivity : Activity() {
 
     override fun onDestroy() {
         stopRefresh()
+        attachCancelled = true
         surface.viewTreeObserver.removeOnGlobalLayoutListener(layoutListener)
         // Cancel queued ops: destroy never replays them into a later session.
         pendingOps.clear()
@@ -232,5 +272,8 @@ class TerminalActivity : Activity() {
         const val TAG = "TerminalActivity"
         const val REFRESH_INTERVAL_MS = 16L
         const val KEY_SESSION_ID = "termux_session_id"
+        const val MAX_ATTACH_RETRIES = 5
+        const val ATTACH_RETRY_BASE_MS = 100L
+        const val ATTACH_RETRY_CAP_MS = 1_000L
     }
 }

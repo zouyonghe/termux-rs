@@ -410,6 +410,96 @@ internal class SessionRegistry(
         }
     }
 
+    /**
+     * Restores persisted session metadata after a service restart. Live-at-
+     * crash sessions become observable terminal failures — a native child
+     * never survives process death, and nothing is ever respawned or
+     * replayed. CLOSED sessions come back with their termination retained.
+     * Idempotent: a restore into a non-empty registry is a no-op, and fresh
+     * sessions always get ids beyond the restored ones.
+     *
+     * Must run on the service owner thread before the first drive pass.
+     */
+    fun restoreSessions(persisted: List<PersistedSession>) {
+        synchronized(lock) {
+            var maxId = 0L
+            persisted.forEach { session ->
+                // A record that violates the contract is skipped, never
+                // crashes: store load already validates, this is the second
+                // line of defense. Existing ids are never overwritten —
+                // under the restore barrier this merge is defense-in-depth
+                // only, not the conflict-resolution mechanism.
+                val entry = runCatching { restoreEntry(session) }.getOrNull() ?: return@forEach
+                if (entries.containsKey(entry.id)) return@forEach
+                entries[entry.id] = entry
+                maxId = maxOf(maxId, session.id)
+            }
+            nextIdValue = maxOf(nextIdValue, maxId + 1)
+        }
+    }
+
+    private fun restoreEntry(session: PersistedSession): Entry? {
+        val request = AppExecutionRequest(
+            origin = RequestOrigin.Internal,
+            executable = session.executable,
+            arguments = session.arguments,
+            workingDirectory = session.workingDirectory,
+            target = session.target,
+            label = session.label,
+            terminalSize = session.terminalSize
+                ?: if (session.target == ExecutionTarget.TERMINAL_SESSION) {
+                    TerminalDimensions(80, 24)
+                } else {
+                    null
+                },
+        )
+        val entry = Entry(SessionId(session.id), request, session.createdAtMs)
+        when (session.lifecycle) {
+            PersistedLifecycle.LIVE -> {
+                // The child died with the process: deterministic, observable,
+                // idempotent terminal failure. engineClosed blocks any spawn.
+                entry.lifecycle = SessionLifecycle.EXITED
+                entry.termination = SessionTermination.Failed(
+                    AppShellError(AppShellErrorCode.INTERNAL_FAILURE, retryable = false),
+                )
+                entry.engineClosed = true
+                entry.closePending = true
+            }
+            PersistedLifecycle.CLOSED -> {
+                val termination = session.termination?.toTermination() ?: return null
+                entry.lifecycle = SessionLifecycle.CLOSED
+                entry.closedAtMs = session.closedAtMs ?: clock()
+                entry.termination = termination
+                entry.engineClosed = true
+            }
+        }
+        return entry
+    }
+
+    /** Current sessions as rebuild-safe metadata for [SessionStateStore]. */
+    fun snapshotForPersistence(): List<PersistedSession> =
+        synchronized(lock) {
+            entries.values.map { entry ->
+                val exited = !entry.live
+                PersistedSession(
+                    id = entry.id.value,
+                    executable = entry.request.executable,
+                    arguments = entry.request.arguments,
+                    workingDirectory = entry.request.workingDirectory,
+                    label = entry.request.label,
+                    target = entry.request.target,
+                    terminalSize = entry.request.terminalSize,
+                    lifecycle = if (exited) PersistedLifecycle.CLOSED else PersistedLifecycle.LIVE,
+                    termination = entry.termination?.toPersisted(),
+                    createdAtMs = entry.createdAtMs,
+                    closedAtMs = entry.closedAtMs,
+                )
+            }
+        }
+
+    internal fun requestForTest(id: SessionId): AppExecutionRequest? =
+        synchronized(lock) { entries[id]?.request }
+
     private fun notFound(): AppShellResult.Failure =
         failure(AppShellErrorCode.SESSION_NOT_FOUND, retryable = false)
 
@@ -423,4 +513,23 @@ internal class SessionRegistry(
          *  the entry is purged. */
         const val DEFAULT_CLOSED_RETENTION_MS = 300_000L
     }
+}
+
+private fun SessionTermination.toPersisted(): PersistedTermination = when (this) {
+    is SessionTermination.ProcessExited ->
+        PersistedTermination(PersistedTerminationKind.EXITED, code.toString())
+    is SessionTermination.Cancelled ->
+        PersistedTermination(PersistedTerminationKind.CANCELLED, reason.name)
+    is SessionTermination.TimedOut ->
+        PersistedTermination(PersistedTerminationKind.TIMEOUT, timeoutMilliseconds.toString())
+    is SessionTermination.Failed ->
+        PersistedTermination(PersistedTerminationKind.FAILED, error.code.name)
+}
+
+private fun PersistedTermination.toTermination(): SessionTermination = when (kind) {
+    PersistedTerminationKind.EXITED -> SessionTermination.ProcessExited(value.toInt())
+    PersistedTerminationKind.CANCELLED -> SessionTermination.Cancelled(CancellationReason.valueOf(value))
+    PersistedTerminationKind.TIMEOUT -> SessionTermination.TimedOut(value.toLong())
+    PersistedTerminationKind.FAILED ->
+        SessionTermination.Failed(AppShellError(AppShellErrorCode.valueOf(value), retryable = false))
 }

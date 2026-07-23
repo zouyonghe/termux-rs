@@ -38,8 +38,14 @@ class RunCommandServiceTest {
         }
         Robolectric.buildService(TermuxService::class.java).create()
 
+        // Drain is async (restore barrier -> worker load -> owner apply ->
+        // drain). Poll with an upper bound instead of assuming synchrony.
+        var sessions: List<SessionSnapshot> = emptyList()
+        awaitTrue("run-command session drained") {
+            sessions = (TermuxService.instance!!.core.api.sessions() as AppShellResult.Success).value
+            sessions.isNotEmpty()
+        }
         assertEquals(0, PendingRunCommands.size)
-        val sessions = (TermuxService.instance!!.core.api.sessions() as AppShellResult.Success).value
         assertEquals(1, sessions.size)
         assertEquals(ExecutionTarget.APP_SHELL, sessions.single().target)
     }
@@ -65,7 +71,12 @@ class RunCommandServiceTest {
         }
         Robolectric.buildService(TermuxService::class.java).create()
 
-        val sessions = (TermuxService.instance!!.core.api.sessions() as AppShellResult.Success).value
+        var sessions: List<SessionSnapshot> = emptyList()
+        val svc = TermuxService.instance!!
+        awaitTrue("all 20 drained") {
+            sessions = (svc.core.api.sessions() as AppShellResult.Success).value
+            sessions.size == 20
+        }
         assertEquals(20, sessions.size)
         assertEquals(0, PendingRunCommands.size)
     }
@@ -120,19 +131,21 @@ class RunCommandServiceTest {
 
         // Exactly one request remains — and it must be the first token.
         assertEquals(1, PendingRunCommands.size)
-
         Robolectric.buildService(TermuxService::class.java).create()
-        val sessions = { ->
-            (TermuxService.instance!!.core.api.sessions() as AppShellResult.Success).value
+        var sessions: List<SessionSnapshot> = emptyList()
+        awaitTrue("run-command session drained") {
+            sessions = (TermuxService.instance!!.core.api.sessions() as AppShellResult.Success).value
+            sessions.isNotEmpty()
         }
-        assertEquals(1, sessions().size)
+        assertEquals(1, sessions.size)
 
         // The failed request must never fire later: queue stays empty across
         // further drive passes.
+        TermuxService.instance!!.stopDriveLoopForTest()
         TermuxService.instance!!.runDriveLoopOnceForTest()
         TermuxService.instance!!.runDriveLoopOnceForTest()
         assertEquals(0, PendingRunCommands.size)
-        assertEquals(1, sessions().size)
+        assertEquals(1, sessions.size)
     }
 
     private fun request() = AppExecutionRequest(
@@ -140,6 +153,15 @@ class RunCommandServiceTest {
         executable = "/system/bin/true",
         target = ExecutionTarget.APP_SHELL,
     )
+
+    private fun awaitTrue(description: String, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return
+            Thread.sleep(15)
+        }
+        throw AssertionError("timed out: " + description)
+    }
 
     private fun validIntent(): Intent = Intent(RunCommandIntentParser.ACTION_RUN_COMMAND)
         .putExtra(RunCommandIntentParser.EXTRA_PATH, "/system/bin/true")

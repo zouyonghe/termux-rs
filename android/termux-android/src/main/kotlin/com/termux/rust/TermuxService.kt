@@ -54,6 +54,7 @@ class TermuxService : Service() {
                 drainPendingRunCommands()
                 core.registry.driveAll()
                 core.registry.reapTerminals()
+                core.persistIfChanged()
                 val decision = ForegroundPolicy.decide(
                     summary = core.registry.summary(),
                     sessionCount = (core.registry.sessions() as AppShellResult.Success).value.size,
@@ -72,12 +73,27 @@ class TermuxService : Service() {
     internal fun runDriveLoopOnceForTest() = driveLoop.run()
 
     /** Test hook: stops the background drive loop AND waits for any
-     *  in-flight pass to finish, so manual drives cannot race it. */
+     *  in-flight pass to finish, so manual drives cannot race it. Waits for
+     *  the restore barrier first (the loop now starts inside restore-apply). */
     internal fun stopDriveLoopForTest() {
+        core.awaitRestoreForTest()
         ownerHandler?.removeCallbacks(driveLoop)
         val idle = CountDownLatch(1)
         ownerHandler?.post { idle.countDown() }
         idle.await(2, TimeUnit.SECONDS)
+    }
+
+    /** Test hook: runs a block on the owner thread and waits for it. */
+    internal fun runOnOwnerThreadForTest(block: () -> Unit) {
+        val done = CountDownLatch(1)
+        ownerHandler?.post {
+            try {
+                block()
+            } finally {
+                done.countDown()
+            }
+        }
+        done.await(5, TimeUnit.SECONDS)
     }
 
     override fun onCreate() {
@@ -89,11 +105,22 @@ class TermuxService : Service() {
         val bootstrap = bootstrapInstallerFactory(this)
         core = TermuxServiceCore(registryFactory(), { message, error ->
             Log.e(TAG, message, error)
-        }, bootstrap)
+        }, bootstrap, stateStoreFactory(this))
         createNotificationChannel()
         instance = this
-        drainPendingRunCommands()
-        ownerHandler?.post(driveLoop)
+        // Restore barrier first: persisted state is applied on the owner
+        // thread, THEN the queue drains and only THEN does the drive loop
+        // start. No session can be created or delivered out of order, and
+        // the barrier can never deadlock against a loop pass on this thread.
+        ownerHandler?.let { handler ->
+            core.restoreSessions({ apply -> handler.post(apply) }) {
+                // Loop starts FIRST so it can never be skipped by a drain
+                // failure; the drain itself is failure-isolated.
+                handler.post(driveLoop)
+                runCatching { drainPendingRunCommands() }
+                    .onFailure { Log.e(TAG, "post-restore drain failed", it) }
+            }
+        }
         // Bootstrap I/O never runs on main/Binder or the session/FFI owner
         // thread: it gets its own single-thread executor so a large unpack
         // cannot stall driveAll, input, rendering, or termination.
@@ -118,6 +145,7 @@ class TermuxService : Service() {
             val done = CountDownLatch(1)
             handler.post {
                 try {
+                    core.flushPersistence(2_000)
                     core.destroy()
                 } finally {
                     done.countDown()
@@ -240,6 +268,11 @@ class TermuxService : Service() {
                 root = context.filesDir,
                 payload = AssetBootstrapPayloadSource(context.assets, BOOTSTRAP_ASSET),
             )
+        }
+
+        /** Session metadata store boundary for crash recovery. */
+        internal var stateStoreFactory: (android.content.Context) -> SessionStateStore = { context ->
+            SessionStateStore(java.io.File(context.filesDir, "session-state.bin"))
         }
     }
 }

@@ -280,6 +280,69 @@ mod tests {
     }
 
     #[test]
+    fn dropped_master_reaps_child_via_hangup() {
+        // Process-death scenario: the master is closed without an explicit
+        // terminate, so the kernel delivers SIGHUP to the foreground process
+        // group. Both the session leader (sh) and its long-lived child must
+        // be gone. A zombie counts as terminated-awaiting-reap (reclaimed by
+        // the parent's wait, or by init once this process exits).
+        fn process_gone_or_zombie(pid: u32) -> bool {
+            let output = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "stat="])
+                .output()
+                .expect("ps must run");
+            let stat = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            stat.is_empty() || stat.starts_with('Z')
+        }
+
+        let mut session = UnixPtySession::spawn(
+            "/bin/sh",
+            &["-c", "sleep 30 & echo SLEEPPID=$!; wait"],
+            PtySize::new(80, 24),
+        )
+        .unwrap();
+        let shell_pid = session
+            .child
+            .process_id()
+            .expect("child must expose its pid");
+        let mut reader = session.take_reader().unwrap();
+        let mut output = String::new();
+        let sleep_pid: u32 = (|| {
+            for _ in 0..200 {
+                let mut buffer = [0u8; 1024];
+                if let Ok(count) = reader.read(&mut buffer) {
+                    if count > 0 {
+                        output.push_str(&String::from_utf8_lossy(&buffer[..count]));
+                        if let Some(line) =
+                            output.lines().find(|line| line.starts_with("SLEEPPID="))
+                        {
+                            return line["SLEEPPID=".len()..].trim().parse().ok();
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            None
+        })()
+        .expect("grandchild pid must be reported");
+        drop(reader);
+        drop(session); // master fd closes here
+
+        let mut shell_dead = false;
+        let mut sleep_dead = false;
+        for _ in 0..200 {
+            shell_dead = shell_dead || process_gone_or_zombie(shell_pid);
+            sleep_dead = sleep_dead || process_gone_or_zombie(sleep_pid);
+            if shell_dead && sleep_dead {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(shell_dead, "shell {shell_pid} survived master close");
+        assert!(sleep_dead, "grandchild {sleep_pid} survived master close");
+    }
+
+    #[test]
     fn spawns_with_configured_working_directory_and_environment() {
         let command = PtyCommand {
             program: PathBuf::from("/bin/sh"),
