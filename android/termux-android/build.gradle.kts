@@ -1,5 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+val supportedAndroidAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+
 plugins {
     id("com.android.library")
     kotlin("android")
@@ -12,6 +14,9 @@ android {
     defaultConfig {
         minSdk = 24
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters += supportedAndroidAbis
+        }
     }
 
     compileOptions {
@@ -51,16 +56,32 @@ val buildRustJni = tasks.register<Exec>("buildRustJni") {
     commandLine(
         "sh",
         projectRoot.resolve("scripts/build-android-jni.sh"),
-        "arm64-v8a",
+        "all",
         outputDirectory.get().asFile.absolutePath,
     )
-    inputs.dir(projectRoot.resolve("crates/termux-ffi"))
+    inputs.dir(projectRoot.resolve("crates"))
+    inputs.file(projectRoot.resolve("Cargo.toml"))
     inputs.file(projectRoot.resolve("Cargo.lock"))
     inputs.file(projectRoot.resolve("scripts/build-android-jni.sh"))
     inputs.file(projectDir.resolve("src/main/cpp/bootstrap_jni.c"))
     outputs.dir(outputDirectory)
 }
 
-tasks.named("preBuild") {
+val verifyRustJniAbis = tasks.register("verifyRustJniAbis") {
     dependsOn(buildRustJni)
+    doLast {
+        supportedAndroidAbis.forEach { abi ->
+            val library = layout.buildDirectory
+                .file("rustJni/$abi/libtermux_ffi.so")
+                .get()
+                .asFile
+            check(library.isFile && library.length() > 0) {
+                "Missing Rust JNI library for $abi: $library"
+            }
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(verifyRustJniAbis)
 }

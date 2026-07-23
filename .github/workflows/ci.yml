@@ -18,3 +18,31 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Verify ABI contract
+        run: sh scripts/test-android-abi-matrix.sh
+      - name: Build Android debug and release artifacts
+        run: gradle -p android :termux-android:assembleDebug :termux-android:assembleRelease
+      - name: Verify packaged JNI libraries
+        run: |
+          sh scripts/verify-android-abi-artifacts.sh android/termux-android/build/outputs/aar/termux-android-debug.aar
+          sh scripts/verify-android-abi-artifacts.sh android/termux-android/build/outputs/aar/termux-android-release.aar
